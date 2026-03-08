@@ -756,9 +756,9 @@ joplin.plugins.register({
 		await loadStats();
 
 		panelHandle = await joplin.views.panels.create(PANEL_ID);
+		await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 		await joplin.views.panels.addScript(panelHandle, './webview.css');
 		await joplin.views.panels.addScript(panelHandle, './webview.js');
-		await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			if (message?.type === 'ready') {
