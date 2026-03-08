@@ -196,8 +196,14 @@ webviewApi.onMessage(message => {
 	}
 });
 
-document.addEventListener('DOMContentLoaded', () => {
+function init() {
 	bindForm();
 	renderResults();
 	webviewApi.postMessage({ type: 'ready' });
-});
+}
+
+if (document.readyState === 'loading') {
+	document.addEventListener('DOMContentLoaded', init);
+} else {
+	init();
+}
