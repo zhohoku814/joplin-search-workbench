@@ -16,17 +16,71 @@ const state = {
 	response: null,
 };
 
+const watchedFieldIds = new Set([
+	'queryInput',
+	'modeSelect',
+	'scopeSelect',
+	'sortBySelect',
+	'sortDirSelect',
+	'groupBySelect',
+	'notebookInput',
+	'noteTypeSelect',
+	'dateFieldSelect',
+	'dateFromInput',
+	'dateToInput',
+	'caseSensitiveInput',
+]);
+
 let searchTimer = null;
+let readyPingTimer = null;
+let readyAcked = false;
+let booted = false;
 
 function $(id) {
 	return document.getElementById(id);
 }
 
-function debounceSearch() {
-	clearTimeout(searchTimer);
-	searchTimer = setTimeout(() => {
-		webviewApi.postMessage({ type: 'search', payload: { ...state.request } });
-	}, 180);
+function hasCoreDom() {
+	return !!$('queryInput') && !!$('resultsRoot') && !!$('statusText');
+}
+
+function setStatusText(text) {
+	const node = $('statusText');
+	if (node) node.textContent = text;
+}
+
+function setMetaText(text) {
+	const node = $('metaText');
+	if (node) node.textContent = text;
+}
+
+function safeClosest(target, selector) {
+	if (!target || !target.closest) return null;
+	return target.closest(selector);
+}
+
+function safePostMessage(message) {
+	try {
+		return webviewApi.postMessage(message);
+	} catch (_error) {
+		setStatusText('消息桥发送失败');
+		return Promise.resolve(null);
+	}
+}
+
+function stopReadyPings() {
+	if (readyPingTimer) clearInterval(readyPingTimer);
+	readyPingTimer = null;
+}
+
+function startReadyPings() {
+	stopReadyPings();
+	let count = 0;
+	readyPingTimer = setInterval(() => {
+		count += 1;
+		safePostMessage({ type: 'ready' });
+		if (readyAcked || count >= 20) stopReadyPings();
+	}, 500);
 }
 
 function escapeHtml(text) {
@@ -44,7 +98,9 @@ function escapeRegExp(text) {
 
 function highlightText(text, highlights) {
 	let html = escapeHtml(text || '');
-	const unique = Array.from(new Set((highlights || []).filter(Boolean))).sort((a, b) => b.length - a.length).slice(0, 12);
+	const unique = Array.from(new Set((highlights || []).filter(Boolean)))
+		.sort((a, b) => b.length - a.length)
+		.slice(0, 12);
 	for (const item of unique) {
 		html = html.replace(new RegExp(escapeRegExp(escapeHtml(item)), 'gi'), match => `<mark>${match}</mark>`);
 	}
@@ -58,18 +114,19 @@ function formatTime(ts) {
 
 function renderResults() {
 	const root = $('resultsRoot');
-	const meta = $('metaText');
+	if (!root) return false;
+
 	const response = state.response;
 	if (!response) {
 		root.innerHTML = '<div class="empty">还没有结果。</div>';
-		meta.textContent = '';
-		return;
+		setMetaText('');
+		return true;
 	}
 
-	meta.textContent = `分组 ${response.groups.length} · 结果 ${response.resultCount}`;
+	setMetaText(`分组 ${response.groups.length} · 结果 ${response.resultCount}`);
 	if (!response.groups.length) {
 		root.innerHTML = '<div class="empty">没有匹配结果。</div>';
-		return;
+		return true;
 	}
 
 	root.innerHTML = response.groups.map(group => {
@@ -93,7 +150,7 @@ function renderResults() {
 							<article class="result-item">
 								<div class="result-header">
 									<div>
-										<div class="result-title">${highlightText(item.title, item.snippets?.[0]?.highlights || [])}</div>
+										<div class="result-title">${highlightText(item.title, (item.snippets && item.snippets[0] && item.snippets[0].highlights) || [])}</div>
 										<div class="result-path">${escapeHtml(item.folderPath)} · ${item.noteType === 'todo' ? '待办' : '笔记'}</div>
 									</div>
 									<div class="result-side">
@@ -114,96 +171,171 @@ function renderResults() {
 			</section>
 		`;
 	}).join('');
+
+	return true;
 }
 
 function applyRequestToForm(request) {
-	$('queryInput').value = request.query || '';
-	$('modeSelect').value = request.mode || 'smart';
-	$('scopeSelect').value = request.scope || 'all';
-	$('sortBySelect').value = request.sortBy || 'relevance';
-	$('sortDirSelect').value = request.sortDir || 'desc';
-	$('groupBySelect').value = request.groupBy || 'none';
-	$('notebookInput').value = request.notebookQuery || '';
-	$('noteTypeSelect').value = request.noteType || 'all';
-	$('dateFieldSelect').value = request.dateField || 'updated';
-	$('dateFromInput').value = request.dateFrom || '';
-	$('dateToInput').value = request.dateTo || '';
-	$('caseSensitiveInput').checked = !!request.caseSensitive;
+	const queryInput = $('queryInput');
+	const modeSelect = $('modeSelect');
+	const scopeSelect = $('scopeSelect');
+	const sortBySelect = $('sortBySelect');
+	const sortDirSelect = $('sortDirSelect');
+	const groupBySelect = $('groupBySelect');
+	const notebookInput = $('notebookInput');
+	const noteTypeSelect = $('noteTypeSelect');
+	const dateFieldSelect = $('dateFieldSelect');
+	const dateFromInput = $('dateFromInput');
+	const dateToInput = $('dateToInput');
+	const caseSensitiveInput = $('caseSensitiveInput');
+
+	if (!queryInput || !modeSelect || !scopeSelect || !sortBySelect || !sortDirSelect || !groupBySelect || !notebookInput || !noteTypeSelect || !dateFieldSelect || !dateFromInput || !dateToInput || !caseSensitiveInput) {
+		return false;
+	}
+
+	queryInput.value = request.query || '';
+	modeSelect.value = request.mode || 'smart';
+	scopeSelect.value = request.scope || 'all';
+	sortBySelect.value = request.sortBy || 'relevance';
+	sortDirSelect.value = request.sortDir || 'desc';
+	groupBySelect.value = request.groupBy || 'none';
+	notebookInput.value = request.notebookQuery || '';
+	noteTypeSelect.value = request.noteType || 'all';
+	dateFieldSelect.value = request.dateField || 'updated';
+	dateFromInput.value = request.dateFrom || '';
+	dateToInput.value = request.dateTo || '';
+	caseSensitiveInput.checked = !!request.caseSensitive;
+	return true;
 }
 
 function updateRequestFromForm() {
 	state.request = {
-		query: $('queryInput').value,
-		mode: $('modeSelect').value,
-		scope: $('scopeSelect').value,
-		caseSensitive: $('caseSensitiveInput').checked,
-		noteType: $('noteTypeSelect').value,
-		notebookQuery: $('notebookInput').value,
-		dateField: $('dateFieldSelect').value,
-		dateFrom: $('dateFromInput').value,
-		dateTo: $('dateToInput').value,
-		sortBy: $('sortBySelect').value,
-		sortDir: $('sortDirSelect').value,
-		groupBy: $('groupBySelect').value,
+		query: $('queryInput') ? $('queryInput').value : '',
+		mode: $('modeSelect') ? $('modeSelect').value : 'smart',
+		scope: $('scopeSelect') ? $('scopeSelect').value : 'all',
+		caseSensitive: $('caseSensitiveInput') ? !!$('caseSensitiveInput').checked : false,
+		noteType: $('noteTypeSelect') ? $('noteTypeSelect').value : 'all',
+		notebookQuery: $('notebookInput') ? $('notebookInput').value : '',
+		dateField: $('dateFieldSelect') ? $('dateFieldSelect').value : 'updated',
+		dateFrom: $('dateFromInput') ? $('dateFromInput').value : '',
+		dateTo: $('dateToInput') ? $('dateToInput').value : '',
+		sortBy: $('sortBySelect') ? $('sortBySelect').value : 'relevance',
+		sortDir: $('sortDirSelect') ? $('sortDirSelect').value : 'desc',
+		groupBy: $('groupBySelect') ? $('groupBySelect').value : 'none',
 	};
 }
 
-function bindForm() {
-	['queryInput','modeSelect','scopeSelect','sortBySelect','sortDirSelect','groupBySelect','notebookInput','noteTypeSelect','dateFieldSelect','dateFromInput','dateToInput','caseSensitiveInput']
-		.forEach(id => {
-			$(id).addEventListener('input', () => {
-				updateRequestFromForm();
-				debounceSearch();
-			});
-			$(id).addEventListener('change', () => {
-				updateRequestFromForm();
-				debounceSearch();
-			});
-		});
+function sendSearch(immediate) {
+	updateRequestFromForm();
+	clearTimeout(searchTimer);
+	const run = () => {
+		setStatusText(state.request.query.trim() ? '正在搜索...' : '请输入搜索词。');
+		safePostMessage({ type: 'search', payload: { ...state.request } });
+	};
+	if (immediate) {
+		run();
+	} else {
+		searchTimer = setTimeout(run, 180);
+	}
+}
 
-	$('refreshIndexBtn').addEventListener('click', () => {
-		webviewApi.postMessage({ type: 'refreshIndex' });
-	});
+function bindEventsOnce() {
+	if (bindEventsOnce.done) return;
+	bindEventsOnce.done = true;
+
+	document.addEventListener('input', event => {
+		const target = event.target;
+		if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
+		sendSearch(false);
+	}, true);
+
+	document.addEventListener('change', event => {
+		const target = event.target;
+		if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
+		sendSearch(false);
+	}, true);
+
+	document.addEventListener('keydown', event => {
+		const target = event.target;
+		if (!target || target.id !== 'queryInput') return;
+		if (event.key !== 'Enter') return;
+		event.preventDefault();
+		sendSearch(true);
+	}, true);
 
 	document.addEventListener('click', event => {
-		const button = event.target.closest('.snippet-item');
-		if (!button) return;
-		webviewApi.postMessage({
+		const searchButton = safeClosest(event.target, '#searchBtn');
+		if (searchButton) {
+			event.preventDefault();
+			sendSearch(true);
+			return;
+		}
+
+		const refreshButton = safeClosest(event.target, '#refreshIndexBtn');
+		if (refreshButton) {
+			event.preventDefault();
+			setStatusText('正在请求重建索引...');
+			safePostMessage({ type: 'refreshIndex' });
+			return;
+		}
+
+		const snippetButton = safeClosest(event.target, '.snippet-item');
+		if (!snippetButton) return;
+		safePostMessage({
 			type: 'openResult',
 			payload: {
-				noteId: button.dataset.noteId,
-				sectionSlug: button.dataset.sectionSlug || '',
-				line: Number(button.dataset.line || '0'),
+				noteId: snippetButton.dataset.noteId,
+				sectionSlug: snippetButton.dataset.sectionSlug || '',
+				line: Number(snippetButton.dataset.line || '0'),
 			},
 		});
-	});
+	}, true);
+}
+
+bindEventsOnce.done = false;
+
+function boot(attempt) {
+	if (booted) return;
+	if (!hasCoreDom()) {
+		if (attempt < 60) setTimeout(() => boot(attempt + 1), 100);
+		return;
+	}
+
+	booted = true;
+	bindEventsOnce();
+	renderResults();
+	setStatusText('准备就绪');
+	startReadyPings();
+	safePostMessage({ type: 'ready' });
 }
 
 webviewApi.onMessage(message => {
+	if (!message) return;
+
 	if (message.type === 'init') {
-		state.request = { ...state.request, ...(message.payload?.request || {}) };
-		applyRequestToForm(state.request);
+		readyAcked = true;
+		stopReadyPings();
+		state.request = { ...state.request, ...((message.payload && message.payload.request) || {}) };
+		if (!applyRequestToForm(state.request)) {
+			setTimeout(() => applyRequestToForm(state.request), 100);
+		}
 		return;
 	}
+
 	if (message.type === 'status') {
-		$('statusText').textContent = message.text || '准备就绪';
+		readyAcked = true;
+		setStatusText(message.text || '准备就绪');
 		return;
 	}
+
 	if (message.type === 'results') {
-		state.response = message.payload;
-		$('statusText').textContent = message.payload?.statusText || '完成';
-		renderResults();
+		readyAcked = true;
+		state.response = message.payload || null;
+		setStatusText((message.payload && message.payload.statusText) || '完成');
+		if (!renderResults()) {
+			setTimeout(renderResults, 100);
+		}
 	}
 });
 
-function init() {
-	bindForm();
-	renderResults();
-	webviewApi.postMessage({ type: 'ready' });
-}
-
-if (document.readyState === 'loading') {
-	document.addEventListener('DOMContentLoaded', init);
-} else {
-	init();
-}
+boot(0);

@@ -188,6 +188,7 @@ function createPanelHtml(): string {
 			<div class="sw-form">
 				<div class="sw-row query-row">
 					<input id="queryInput" class="sw-input" type="text" placeholder="搜正文、标题、代码块、引用、Markdown 标记...">
+					<button id="searchBtn" class="sw-btn">搜索</button>
 				</div>
 
 				<div class="sw-row compact-grid">
@@ -756,9 +757,6 @@ joplin.plugins.register({
 		await loadStats();
 
 		panelHandle = await joplin.views.panels.create(PANEL_ID);
-		await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
-		await joplin.views.panels.addScript(panelHandle, './webview.css');
-		await joplin.views.panels.addScript(panelHandle, './webview.js');
 
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			if (message?.type === 'ready') {
@@ -780,6 +778,10 @@ joplin.plugins.register({
 				await openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
 			}
 		});
+
+		await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
+		await joplin.views.panels.addScript(panelHandle, './webview.css');
+		await joplin.views.panels.addScript(panelHandle, './webview.js');
 
 		await joplin.commands.register({
 			name: 'searchWorkbench.togglePanel',

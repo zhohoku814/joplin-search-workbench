@@ -47,7 +47,8 @@ body {
 }
 
 .query-row {
-	grid-template-columns: 1fr;
+	grid-template-columns: 1fr auto;
+	align-items: center;
 }
 
 .compact-grid {
