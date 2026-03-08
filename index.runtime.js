@@ -2,9 +2,8 @@ const PANEL_ID = 'searchWorkbench.panel';
 const SETTINGS_SECTION = 'searchWorkbench';
 const SETTINGS_STATS = 'searchWorkbench.noteStats';
 const PAGE_SIZE = 100;
+const BODY_PAGE_SIZE = 20;
 const MAX_RESULTS = 200;
-const MAX_CANDIDATES = 300;
-const BODY_FETCH_LIMIT = 120;
 const SETTING_TYPE_OBJECT = 5;
 const SETTING_STORAGE_FILE = 2;
 
@@ -12,12 +11,11 @@ let panelHandle = null;
 let folderCache = [];
 let folderPathMap = new Map();
 let noteMetaCache = [];
-let noteMetaById = new Map();
 let noteStats = {};
 let lastSearchRequest = defaultSearchRequest();
 let lastSelectedNoteId = '';
 let saveStatsTimer = null;
-let refreshInFlight = null;
+let refreshPromise = null;
 let searchToken = 0;
 
 function defaultSearchRequest() {
@@ -41,10 +39,6 @@ function normaliseNewlines(text) {
 	return String(text || '').replace(/\r\n/g, '\n');
 }
 
-function escapeRegex(text) {
-	return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function slugifyHeading(text) {
 	return String(text || '')
 		.toLowerCase()
@@ -65,12 +59,12 @@ function literalOccurrences(text, needle, caseSensitive) {
 	const haystack = toComparable(text, caseSensitive);
 	const target = toComparable(needle, caseSensitive);
 	let count = 0;
-	let pos = 0;
+	let index = 0;
 	while (true) {
-		const found = haystack.indexOf(target, pos);
+		const found = haystack.indexOf(target, index);
 		if (found < 0) break;
 		count += 1;
-		pos = found + Math.max(1, target.length);
+		index = found + Math.max(1, target.length);
 	}
 	return count;
 }
@@ -173,9 +167,8 @@ function extractSnippets(note, request, body) {
 			});
 		}
 	}
-	if (!includeBody || !body) return snippets;
-
-	const parsed = buildLineMeta(body);
+	if (!includeBody) return snippets;
+	const parsed = buildLineMeta(body || '');
 	const seenLines = new Set();
 	for (let i = 0; i < parsed.lines.length && snippets.length < 4; i += 1) {
 		const line = parsed.lines[i] || '';
@@ -193,6 +186,24 @@ function extractSnippets(note, request, body) {
 		});
 	}
 	return snippets;
+}
+
+function scoreResult(note, request, snippets, body) {
+	const titleMatch = matchText(note.title, request);
+	const bodyMatch = request.scope === 'title' ? { matched: false, hits: 0 } : matchText(body || '', request);
+	let score = 0;
+	if (titleMatch.matched) score += 120 + titleMatch.hits * 18;
+	if (bodyMatch.matched) score += 40 + bodyMatch.hits * 6;
+	if (request.mode === 'literal' && request.query && literalOccurrences(note.title, request.query, request.caseSensitive)) score += 50;
+	if (request.mode === 'smart') {
+		const phrases = parseSmartTokens(request.query).phrases;
+		for (const phrase of phrases) {
+			score += literalOccurrences(note.title, phrase, request.caseSensitive) * 30;
+			score += literalOccurrences(body || '', phrase, request.caseSensitive) * 10;
+		}
+	}
+	if (snippets.length) score += Math.max(0, 20 - snippets[0].line);
+	return score;
 }
 
 function withinDateRange(value, from, to) {
@@ -222,24 +233,6 @@ function noteMatchesFilters(note, request) {
 	else if (request.dateField === 'lastViewed') dateValue = (noteStats[note.id] && noteStats[note.id].lastViewed) || 0;
 	else dateValue = note.updated_time || 0;
 	return withinDateRange(dateValue, request.dateFrom, request.dateTo);
-}
-
-function scoreResult(note, request, snippets, body) {
-	const titleMatch = matchText(note.title, request);
-	const bodyMatch = request.scope === 'title' ? { matched: false, hits: 0 } : matchText(body || '', request);
-	let score = 0;
-	if (titleMatch.matched) score += 120 + titleMatch.hits * 18;
-	if (bodyMatch.matched) score += 40 + bodyMatch.hits * 6;
-	if (request.mode === 'literal' && request.query && literalOccurrences(note.title, request.query, request.caseSensitive)) score += 50;
-	if (request.mode === 'smart') {
-		const phrases = parseSmartTokens(request.query).phrases;
-		for (const phrase of phrases) {
-			score += literalOccurrences(note.title, phrase, request.caseSensitive) * 30;
-			score += literalOccurrences(body || '', phrase, request.caseSensitive) * 10;
-		}
-	}
-	if (snippets.length) score += Math.max(0, 20 - snippets[0].line);
-	return score;
 }
 
 function compareResults(a, b, sortBy, sortDir) {
@@ -284,13 +277,6 @@ function groupLabel(result, groupBy) {
 	return { key: 'all', label: '搜索结果' };
 }
 
-async function showToast(message) {
-	try {
-		await joplin.views.dialogs.showToast({ message, type: 'info' });
-	} catch (_error) {
-	}
-}
-
 function postPanelMessage(message) {
 	if (!panelHandle) return;
 	try {
@@ -301,6 +287,13 @@ function postPanelMessage(message) {
 
 async function postStatus(text) {
 	postPanelMessage({ type: 'status', text });
+}
+
+async function showToast(message) {
+	try {
+		await joplin.views.dialogs.showToast({ message, type: 'info' });
+	} catch (_error) {
+	}
 }
 
 async function fetchPage(path, params) {
@@ -314,7 +307,7 @@ async function fetchAllPaged(path, params, statusPrefix) {
 	const out = [];
 	while (true) {
 		if (statusPrefix) await postStatus(`${statusPrefix}（第 ${page} 页）...`);
-		const current = await fetchPage(path, Object.assign({}, params || {}, { limit: PAGE_SIZE, page }));
+		const current = await fetchPage(path, Object.assign({}, params || {}, { page, limit: PAGE_SIZE }));
 		out.push.apply(out, current.items || []);
 		if (!current.has_more) break;
 		page += 1;
@@ -336,12 +329,7 @@ function buildFolderPaths(folders) {
 		cache.set(folderId, value);
 		return value;
 	}
-	return folders.map(folder => ({
-		id: folder.id,
-		title: folder.title,
-		parent_id: folder.parent_id,
-		path: folderPath(folder.id),
-	}));
+	return folders.map(folder => ({ id: folder.id, title: folder.title, parent_id: folder.parent_id, path: folderPath(folder.id) }));
 }
 
 async function loadStats() {
@@ -364,17 +352,14 @@ async function recordSelectedNoteUsage() {
 	if (!note || !note.id || note.id === lastSelectedNoteId) return;
 	lastSelectedNoteId = note.id;
 	const current = noteStats[note.id] || { usageCount: 0, lastViewed: 0 };
-	noteStats[note.id] = {
-		usageCount: current.usageCount + 1,
-		lastViewed: Date.now(),
-	};
+	noteStats[note.id] = { usageCount: current.usageCount + 1, lastViewed: Date.now() };
 	scheduleSaveStats();
 }
 
 async function refreshBaseCache(reason) {
-	if (refreshInFlight) return refreshInFlight;
-	refreshInFlight = (async () => {
-		await postStatus(`正在刷新缓存（${reason || '手动'}）...`);
+	if (refreshPromise) return refreshPromise;
+	refreshPromise = (async () => {
+		await postStatus(`正在刷新索引（${reason || '手动'}）...`);
 		const folders = await fetchAllPaged(['folders'], { fields: ['id', 'title', 'parent_id'] }, '读取笔记本');
 		folderCache = buildFolderPaths(folders);
 		folderPathMap = new Map(folderCache.map(folder => [folder.id, folder.path]));
@@ -389,12 +374,11 @@ async function refreshBaseCache(reason) {
 			todo_completed: note.todo_completed || 0,
 			folderPath: folderPathMap.get(note.parent_id) || '未知笔记本',
 		}));
-		noteMetaById = new Map(noteMetaCache.map(note => [note.id, note]));
-		await postStatus(`缓存已就绪：${folderCache.length} 个笔记本，${noteMetaCache.length} 篇笔记。`);
+		await postStatus(`索引已就绪：${folderCache.length} 个笔记本，${noteMetaCache.length} 篇笔记。`);
 	})().finally(() => {
-		refreshInFlight = null;
+		refreshPromise = null;
 	});
-	return refreshInFlight;
+	return refreshPromise;
 }
 
 async function ensureBaseCache() {
@@ -403,55 +387,131 @@ async function ensureBaseCache() {
 	}
 }
 
-async function fetchNoteBody(noteId) {
-	const note = await joplin.data.get(['notes', noteId], { fields: ['id', 'body'] });
-	return note && note.body ? String(note.body) : '';
-}
-
-function buildSearchApiQuery(request) {
-	const query = String(request.query || '').trim();
-	if (!query) return '';
-	if (request.mode === 'literal') {
-		return `"${query.replace(/"/g, '\\"')}"`;
+function buildResponse(request, results) {
+	results.sort((a, b) => compareResults(a, b, request.sortBy, request.sortDir));
+	const limited = results.slice(0, MAX_RESULTS);
+	const groupedMap = new Map();
+	for (const result of limited) {
+		const group = groupLabel(result, request.groupBy);
+		if (!groupedMap.has(group.key)) groupedMap.set(group.key, { key: group.key, label: group.label, items: [] });
+		groupedMap.get(group.key).items.push(result);
 	}
-	return query;
+	return {
+		request,
+		statusText: results.length > MAX_RESULTS ? `命中 ${results.length} 条，已显示前 ${MAX_RESULTS} 条。` : `命中 ${results.length} 条。`,
+		resultCount: results.length,
+		groups: Array.from(groupedMap.values()),
+	};
 }
 
-async function fetchSearchCandidates(request) {
+function makeResultFromTitleOnly(note, request) {
+	const titleMatch = matchText(note.title, request);
+	if (!titleMatch.matched) return null;
+	const snippets = [{ text: note.title, line: 0, blockType: 'title', sectionText: '', sectionSlug: '', highlights: titleMatch.highlights }];
+	const stats = noteStats[note.id] || { usageCount: 0, lastViewed: 0 };
+	return {
+		noteId: note.id,
+		title: note.title,
+		folderPath: note.folderPath,
+		noteType: note.is_todo ? 'todo' : 'note',
+		updatedTime: note.updated_time,
+		createdTime: note.created_time,
+		lastViewed: stats.lastViewed || 0,
+		usageCount: stats.usageCount || 0,
+		bodyLength: 0,
+		score: scoreResult(note, request, snippets, ''),
+		snippets,
+	};
+}
+
+async function runTitleOnlySearch(request, token) {
 	await ensureBaseCache();
-	if (request.mode === 'regex') {
-		await postStatus('正则模式：扫描全部笔记元数据...');
-		return noteMetaCache.slice();
+	const pool = noteMetaCache.filter(note => noteMatchesFilters(note, request));
+	await postStatus(`正在搜索标题（${pool.length} 篇）...`);
+	const results = [];
+	for (let i = 0; i < pool.length; i += 1) {
+		if (token !== searchToken) return null;
+		if (i % 200 === 0 && i > 0) await postStatus(`正在搜索标题（${i}/${pool.length}）...`);
+		const result = makeResultFromTitleOnly(pool[i], request);
+		if (result) results.push(result);
+	}
+	return buildResponse(request, results);
+}
+
+async function runFullScanSearch(request, token) {
+	await ensureBaseCache();
+	let page = 1;
+	const results = [];
+	let scanned = 0;
+	while (true) {
+		if (token !== searchToken) return null;
+		await postStatus(`正在扫描正文（第 ${page} 页，已扫 ${scanned} 篇）...`);
+		const current = await fetchPage(['notes'], {
+			fields: ['id', 'title', 'body', 'parent_id', 'updated_time', 'created_time', 'is_todo', 'todo_completed'],
+			page,
+			limit: BODY_PAGE_SIZE,
+		});
+		const items = current.items || [];
+		if (!items.length) break;
+		for (const raw of items) {
+			if (token !== searchToken) return null;
+			scanned += 1;
+			const note = {
+				id: raw.id,
+				title: raw.title || '(无标题)',
+				parent_id: raw.parent_id || '',
+				updated_time: raw.updated_time || 0,
+				created_time: raw.created_time || 0,
+				is_todo: raw.is_todo || 0,
+				todo_completed: raw.todo_completed || 0,
+				folderPath: folderPathMap.get(raw.parent_id) || '未知笔记本',
+			};
+			if (!noteMatchesFilters(note, request)) continue;
+			const body = String(raw.body || '');
+			const titleMatched = request.scope !== 'body' ? matchText(note.title, request) : { matched: false, hits: 0, highlights: [] };
+			const bodyMatched = request.scope !== 'title' ? matchText(body, request) : { matched: false, hits: 0, highlights: [] };
+			if (!titleMatched.matched && !bodyMatched.matched) continue;
+			const snippets = extractSnippets(note, request, body);
+			if (!snippets.length) continue;
+			const stats = noteStats[note.id] || { usageCount: 0, lastViewed: 0 };
+			results.push({
+				noteId: note.id,
+				title: note.title,
+				folderPath: note.folderPath,
+				noteType: note.is_todo ? 'todo' : 'note',
+				updatedTime: note.updated_time,
+				createdTime: note.created_time,
+				lastViewed: stats.lastViewed || 0,
+				usageCount: stats.usageCount || 0,
+				bodyLength: body.length,
+				score: scoreResult(note, request, snippets, body),
+				snippets,
+			});
+		}
+		if (!current.has_more) break;
+		page += 1;
+	}
+	return buildResponse(request, results);
+}
+
+async function runSearch(request) {
+	lastSearchRequest = Object.assign(defaultSearchRequest(), request || {});
+	const token = ++searchToken;
+	const query = String(lastSearchRequest.query || '').trim();
+	if (!query) {
+		postPanelMessage({ type: 'results', payload: { request: lastSearchRequest, statusText: '请输入搜索词。支持智能 / 精确文本 / 正则。', resultCount: 0, groups: [] } });
+		return;
+	}
+	if (lastSearchRequest.mode === 'regex' && !safeRegex(query, lastSearchRequest.caseSensitive)) {
+		postPanelMessage({ type: 'results', payload: { request: lastSearchRequest, statusText: '正则表达式无效，请检查写法。', resultCount: 0, groups: [] } });
+		return;
 	}
 
-	const query = buildSearchApiQuery(request);
-	try {
-		const rows = await fetchAllPaged(['search'], {
-			query,
-			fields: ['id', 'title', 'parent_id', 'updated_time', 'created_time', 'is_todo', 'todo_completed'],
-		}, '调用 Joplin 内置搜索');
-		const candidates = [];
-		for (const row of rows) {
-			const cached = noteMetaById.get(row.id);
-			if (cached) candidates.push(cached);
-			else {
-				candidates.push({
-					id: row.id,
-					title: row.title || '(无标题)',
-					parent_id: row.parent_id || '',
-					updated_time: row.updated_time || 0,
-					created_time: row.created_time || 0,
-					is_todo: row.is_todo || 0,
-					todo_completed: row.todo_completed || 0,
-					folderPath: folderPathMap.get(row.parent_id) || '未知笔记本',
-				});
-			}
-		}
-		return candidates;
-	} catch (_error) {
-		await postStatus('内置搜索不可用，回退到元数据扫描...');
-		return noteMetaCache.slice();
-	}
+	let response = null;
+	if (lastSearchRequest.scope === 'title') response = await runTitleOnlySearch(lastSearchRequest, token);
+		else response = await runFullScanSearch(lastSearchRequest, token);
+	if (!response || token !== searchToken) return;
+	postPanelMessage({ type: 'results', payload: response });
 }
 
 async function openResult(noteId, sectionSlug, line) {
@@ -467,7 +527,6 @@ async function openResult(noteId, sectionSlug, line) {
 			opened = false;
 		}
 	}
-
 	if (opened && sectionSlug) {
 		await new Promise(resolve => setTimeout(resolve, 120));
 		try {
@@ -475,102 +534,11 @@ async function openResult(noteId, sectionSlug, line) {
 		} catch (_error) {
 		}
 	}
-
 	if (!opened) {
 		await showToast('没有成功打开目标笔记。');
 		return;
 	}
 	await showToast(line > 0 ? `已打开，命中在第 ${line} 行附近` : '已打开目标笔记');
-}
-
-async function runSearch(request) {
-	lastSearchRequest = Object.assign(defaultSearchRequest(), request || {});
-	const token = ++searchToken;
-	const query = String(lastSearchRequest.query || '').trim();
-	if (!query) {
-		postPanelMessage({
-			type: 'results',
-			payload: { request: lastSearchRequest, statusText: '请输入搜索词。支持智能 / 精确文本 / 正则。', resultCount: 0, groups: [] },
-		});
-		return;
-	}
-
-	if (lastSearchRequest.mode === 'regex' && !safeRegex(query, lastSearchRequest.caseSensitive)) {
-		postPanelMessage({
-			type: 'results',
-			payload: { request: lastSearchRequest, statusText: '正则表达式无效，请检查写法。', resultCount: 0, groups: [] },
-		});
-		return;
-	}
-
-	await postStatus('正在准备候选结果...');
-	let candidates = await fetchSearchCandidates(lastSearchRequest);
-	if (token !== searchToken) return;
-
-	candidates = candidates.filter(note => noteMatchesFilters(note, lastSearchRequest));
-	if (candidates.length > MAX_CANDIDATES) candidates = candidates.slice(0, MAX_CANDIDATES);
-	await postStatus(`候选 ${candidates.length} 篇，正在分析内容...`);
-
-	const results = [];
-	for (let i = 0; i < candidates.length; i += 1) {
-		if (token !== searchToken) return;
-		const note = candidates[i];
-		if (i % 10 === 0) await postStatus(`正在分析内容（${i + 1}/${candidates.length}）...`);
-
-		const titleMatch = lastSearchRequest.scope === 'body' ? { matched: false, hits: 0, highlights: [] } : matchText(note.title, lastSearchRequest);
-		let body = '';
-		let bodyMatch = { matched: false, hits: 0, highlights: [] };
-
-		const needBody = lastSearchRequest.scope !== 'title' && (lastSearchRequest.mode === 'regex' || i < BODY_FETCH_LIMIT || !titleMatch.matched);
-		if (needBody) {
-			try {
-				body = await fetchNoteBody(note.id);
-				bodyMatch = matchText(body, lastSearchRequest);
-			} catch (_error) {
-				body = '';
-			}
-		}
-
-		const matched = (lastSearchRequest.scope !== 'body' && titleMatch.matched) || (lastSearchRequest.scope !== 'title' && bodyMatch.matched);
-		if (!matched) continue;
-
-		const snippets = extractSnippets(note, lastSearchRequest, body);
-		if (!snippets.length) continue;
-
-		const stats = noteStats[note.id] || { usageCount: 0, lastViewed: 0 };
-		results.push({
-			noteId: note.id,
-			title: note.title,
-			folderPath: note.folderPath,
-			noteType: note.is_todo ? 'todo' : 'note',
-			updatedTime: note.updated_time,
-			createdTime: note.created_time,
-			lastViewed: stats.lastViewed || 0,
-			usageCount: stats.usageCount || 0,
-			bodyLength: body.length,
-			score: scoreResult(note, lastSearchRequest, snippets, body),
-			snippets,
-		});
-	}
-
-	results.sort((a, b) => compareResults(a, b, lastSearchRequest.sortBy, lastSearchRequest.sortDir));
-	const limited = results.slice(0, MAX_RESULTS);
-	const groupedMap = new Map();
-	for (const result of limited) {
-		const group = groupLabel(result, lastSearchRequest.groupBy);
-		if (!groupedMap.has(group.key)) groupedMap.set(group.key, { key: group.key, label: group.label, items: [] });
-		groupedMap.get(group.key).items.push(result);
-	}
-
-	postPanelMessage({
-		type: 'results',
-		payload: {
-			request: lastSearchRequest,
-			statusText: results.length > MAX_RESULTS ? `命中 ${results.length} 条，已显示前 ${MAX_RESULTS} 条。` : `命中 ${results.length} 条。`,
-			resultCount: results.length,
-			groups: Array.from(groupedMap.values()),
-		},
-	});
 }
 
 function createPanelHtml() {
