@@ -94,8 +94,156 @@ body {
 	justify-content: space-between;
 	gap: 10px;
 	font-size: 12px;
-	opacity: .78;
+	opacity: .9;
 	margin-bottom: 10px;
+}
+
+.sw-status-main {
+	min-width: 0;
+	flex: 1;
+}
+
+#statusText {
+	font-weight: 600;
+}
+
+.sw-status-detail,
+.sw-status-meta {
+	opacity: .74;
+	margin-top: 2px;
+}
+
+.sw-status-meta {
+	white-space: nowrap;
+	text-align: right;
+}
+
+.sw-runtime-root {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.runtime-card {
+	border: 1px solid var(--joplin-divider-color, rgba(127,127,127,.2));
+	border-radius: 10px;
+	padding: 10px;
+	background: rgba(127,127,127,.04);
+}
+
+.runtime-card.running {
+	border-color: rgba(59, 130, 246, .45);
+}
+
+.runtime-card.error {
+	border-color: rgba(239, 68, 68, .45);
+}
+
+.runtime-card.warning {
+	border-color: rgba(245, 158, 11, .45);
+}
+
+.runtime-card.done {
+	border-color: rgba(16, 185, 129, .35);
+}
+
+.runtime-head,
+.runtime-line,
+.runtime-error-item {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	align-items: flex-start;
+}
+
+.runtime-head {
+	margin-bottom: 6px;
+	font-size: 12px;
+}
+
+.runtime-kind {
+	font-weight: 700;
+}
+
+.runtime-phase {
+	opacity: .68;
+	text-transform: uppercase;
+	letter-spacing: .04em;
+}
+
+.runtime-main {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.runtime-progress {
+	height: 8px;
+	border-radius: 999px;
+	background: rgba(127,127,127,.12);
+	overflow: hidden;
+	position: relative;
+}
+
+.runtime-progress.indeterminate::after {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: -35%;
+	width: 35%;
+	height: 100%;
+	background: rgba(59, 130, 246, .55);
+	animation: runtime-bar-slide 1.2s linear infinite;
+}
+
+.runtime-progress-fill {
+	height: 100%;
+	background: linear-gradient(90deg, rgba(59,130,246,.5), rgba(16,185,129,.55));
+	border-radius: inherit;
+	transition: width .18s ease;
+}
+
+.runtime-detail,
+.runtime-stats,
+.runtime-current,
+.runtime-errors {
+	font-size: 12px;
+	opacity: .82;
+}
+
+.runtime-current {
+	word-break: break-word;
+}
+
+.runtime-errors {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.runtime-error-item {
+	padding: 6px 8px;
+	border-radius: 8px;
+	background: rgba(239, 68, 68, .08);
+	flex-wrap: wrap;
+}
+
+.runtime-error-item span {
+	font-weight: 700;
+	text-transform: uppercase;
+	font-size: 11px;
+}
+
+.runtime-error-item strong {
+	font-weight: 600;
+}
+
+.runtime-error-item em {
+	font-style: normal;
+	opacity: .85;
+	flex: 1 1 100%;
 }
 
 .empty {
@@ -217,8 +365,22 @@ mark {
 	border-radius: 2px;
 }
 
+@keyframes runtime-bar-slide {
+	0% { transform: translateX(0); }
+	100% { transform: translateX(300%); }
+}
+
 @media (max-width: 900px) {
 	.compact-grid {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.sw-status {
+		flex-direction: column;
+	}
+
+	.sw-status-meta {
+		text-align: left;
+		white-space: normal;
 	}
 }

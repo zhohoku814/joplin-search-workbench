@@ -14,6 +14,10 @@ const state = {
 		groupBy: 'none',
 	},
 	response: null,
+	runtimes: {
+		index: null,
+		search: null,
+	},
 };
 
 const watchedFieldIds = new Set([
@@ -41,7 +45,7 @@ function $(id) {
 }
 
 function hasCoreDom() {
-	return !!$('queryInput') && !!$('resultsRoot') && !!$('statusText');
+	return !!$('queryInput') && !!$('resultsRoot') && !!$('statusText') && !!$('runtimeRoot');
 }
 
 function setStatusText(text) {
@@ -49,9 +53,14 @@ function setStatusText(text) {
 	if (node) node.textContent = text;
 }
 
+function setStatusDetail(text) {
+	const node = $('statusDetail');
+	if (node) node.textContent = text || '';
+}
+
 function setMetaText(text) {
 	const node = $('metaText');
-	if (node) node.textContent = text;
+	if (node) node.textContent = text || '';
 }
 
 function safeClosest(target, selector) {
@@ -112,6 +121,77 @@ function formatTime(ts) {
 	return new Date(ts).toLocaleString();
 }
 
+function runtimePriority(runtime) {
+	if (!runtime) return 0;
+	if (runtime.state === 'running') return 5;
+	if (runtime.state === 'error') return 4;
+	if (runtime.state === 'warning') return 3;
+	if (runtime.state === 'done') return 2;
+	return 1;
+}
+
+function getPrimaryRuntime() {
+	const candidates = [state.runtimes.search, state.runtimes.index].filter(Boolean);
+	candidates.sort((a, b) => runtimePriority(b) - runtimePriority(a));
+	return candidates[0] || null;
+}
+
+function renderHeaderStatus() {
+	const primary = getPrimaryRuntime();
+	if (primary) {
+		setStatusText(primary.statusText || '准备就绪');
+		setStatusDetail(primary.detail || '');
+	} else if (state.response && state.response.statusText) {
+		setStatusText(state.response.statusText);
+		setStatusDetail('');
+	} else {
+		setStatusText('准备就绪');
+		setStatusDetail('');
+	}
+
+	if (state.response) {
+		setMetaText(`分组 ${state.response.groups.length} · 结果 ${state.response.resultCount}`);
+	} else {
+		setMetaText('');
+	}
+}
+
+function renderRuntimeCards() {
+	const root = $('runtimeRoot');
+	if (!root) return false;
+
+	const order = ['index', 'search'];
+	const cards = order
+		.map(kind => state.runtimes[kind])
+		.filter(Boolean)
+		.map(runtime => {
+			const percentText = runtime.percent == null ? '—' : `${runtime.percent}%`;
+			const progressWidth = runtime.percent == null ? 0 : Math.max(0, Math.min(100, runtime.percent));
+			const errors = Array.isArray(runtime.errors) ? runtime.errors : [];
+			return `
+				<section class="runtime-card ${escapeHtml(runtime.state || 'idle')}">
+					<div class="runtime-head">
+						<div class="runtime-kind">${runtime.kind === 'index' ? '索引状态' : '搜索状态'}</div>
+						<div class="runtime-phase">${escapeHtml(runtime.phase || '')}</div>
+					</div>
+					<div class="runtime-main">
+						<div class="runtime-line"><span>${escapeHtml(runtime.statusText || '—')}</span><strong>${escapeHtml(percentText)}</strong></div>
+						<div class="runtime-progress ${runtime.percent == null ? 'indeterminate' : ''}">
+							<div class="runtime-progress-fill" style="width:${progressWidth}%"></div>
+						</div>
+						<div class="runtime-detail">${escapeHtml(runtime.detail || '') || '—'}</div>
+						<div class="runtime-stats">已处理 ${escapeHtml(String(runtime.processed || 0))}${runtime.total ? ` / ${escapeHtml(String(runtime.total))}` : ''}</div>
+						${runtime.currentLabel ? `<div class="runtime-current">当前：${escapeHtml(runtime.currentLabel)}</div>` : ''}
+						${errors.length ? `<div class="runtime-errors">${errors.map(item => `<div class="runtime-error-item"><span>${escapeHtml(item.stage || 'error')}</span><strong>${escapeHtml(item.item || '')}</strong><em>${escapeHtml(item.message || '')}</em></div>`).join('')}</div>` : ''}
+					</div>
+				</section>
+			`;
+		});
+
+	root.innerHTML = cards.length ? cards.join('') : '';
+	return true;
+}
+
 function renderResults() {
 	const root = $('resultsRoot');
 	if (!root) return false;
@@ -119,11 +199,11 @@ function renderResults() {
 	const response = state.response;
 	if (!response) {
 		root.innerHTML = '<div class="empty">还没有结果。</div>';
-		setMetaText('');
+		renderHeaderStatus();
 		return true;
 	}
 
-	setMetaText(`分组 ${response.groups.length} · 结果 ${response.resultCount}`);
+	renderHeaderStatus();
 	if (!response.groups.length) {
 		root.innerHTML = '<div class="empty">没有匹配结果。</div>';
 		return true;
@@ -229,7 +309,7 @@ function sendSearch(immediate) {
 	updateRequestFromForm();
 	clearTimeout(searchTimer);
 	const run = () => {
-		setStatusText(state.request.query.trim() ? '正在搜索...' : '请输入搜索词。');
+		setStatusText(state.request.query.trim() ? '正在发起搜索...' : '请输入搜索词。');
 		safePostMessage({ type: 'search', payload: { ...state.request } });
 	};
 	if (immediate) {
@@ -303,8 +383,9 @@ function boot(attempt) {
 
 	booted = true;
 	bindEventsOnce();
+	renderRuntimeCards();
 	renderResults();
-	setStatusText('准备就绪');
+	renderHeaderStatus();
 	startReadyPings();
 	safePostMessage({ type: 'ready' });
 }
@@ -316,8 +397,21 @@ webviewApi.onMessage(message => {
 		readyAcked = true;
 		stopReadyPings();
 		state.request = { ...state.request, ...((message.payload && message.payload.request) || {}) };
+		state.runtimes = { ...state.runtimes, ...((message.payload && message.payload.runtimes) || {}) };
 		if (!applyRequestToForm(state.request)) {
 			setTimeout(() => applyRequestToForm(state.request), 100);
+		}
+		renderRuntimeCards();
+		renderHeaderStatus();
+		return;
+	}
+
+	if (message.type === 'runtime') {
+		readyAcked = true;
+		if (message.payload && message.payload.kind) {
+			state.runtimes[message.payload.kind] = message.payload;
+			renderRuntimeCards();
+			renderHeaderStatus();
 		}
 		return;
 	}
@@ -331,7 +425,6 @@ webviewApi.onMessage(message => {
 	if (message.type === 'results') {
 		readyAcked = true;
 		state.response = message.payload || null;
-		setStatusText((message.payload && message.payload.statusText) || '完成');
 		if (!renderResults()) {
 			setTimeout(renderResults, 100);
 		}
