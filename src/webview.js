@@ -96,12 +96,46 @@ function armBridgeTimeout(actionLabel) {
 
 function safePostMessage(message) {
 	try {
-		return webviewApi.postMessage(message);
+		return Promise.resolve(webviewApi.postMessage(message));
 	} catch (_error) {
 		setStatusText('消息桥发送失败');
 		setStatusDetail('webviewApi.postMessage 调用失败');
-		return Promise.resolve(null);
+		return Promise.resolve({ ok: false, action: 'post-exception' });
 	}
+}
+
+function sendCommand(message, actionLabel, waitingText, waitingDetail) {
+	setStatusText(waitingText);
+	setStatusDetail(waitingDetail);
+	armBridgeTimeout(actionLabel);
+	return safePostMessage(message).then(response => {
+		if (response && response.ok) {
+			clearBridgeTimeout();
+			return response;
+		}
+		clearBridgeTimeout();
+		const errorText = response && response.error ? response.error : '主线程没有确认接单';
+		setStatusText(`${actionLabel}未被主线程确认`);
+		setStatusDetail(errorText);
+		state.runtimes.index = {
+			kind: 'index',
+			phase: 'command-rejected',
+			state: 'error',
+			statusText: `${actionLabel}未被主线程确认`,
+			detail: errorText,
+			processed: 0,
+			total: 0,
+			errors: [{ stage: 'command', item: actionLabel, message: errorText }],
+		};
+		renderRuntimeCards();
+		renderHeaderStatus();
+		return response;
+	}).catch(error => {
+		clearBridgeTimeout();
+		setStatusText(`${actionLabel}消息发送失败`);
+		setStatusDetail(String(error && error.message ? error.message : error));
+		return { ok: false, action: 'promise-rejected', error: String(error && error.message ? error.message : error) };
+	});
 }
 
 function stopReadyPings() {
@@ -111,7 +145,6 @@ function stopReadyPings() {
 
 function startReadyPings() {
 	stopReadyPings();
-	armBridgeTimeout('初始化握手');
 	let count = 0;
 	readyPingTimer = setInterval(() => {
 		count += 1;
@@ -337,10 +370,17 @@ function sendSearch(immediate) {
 	updateRequestFromForm();
 	clearTimeout(searchTimer);
 	const run = () => {
-		setStatusText(state.request.query.trim() ? '正在发起搜索...' : '请输入搜索词。');
-		setStatusDetail('等待插件主线程接手搜索请求');
-		armBridgeTimeout('搜索');
-		safePostMessage({ type: 'search', payload: { ...state.request } });
+		if (!state.request.query.trim()) {
+			setStatusText('请输入搜索词。');
+			setStatusDetail('');
+			return;
+		}
+		void sendCommand(
+			{ type: 'search', payload: { ...state.request } },
+			'搜索',
+			'正在发起搜索...',
+			'等待插件主线程接手搜索请求',
+		);
 	};
 	if (immediate) {
 		run();
@@ -384,10 +424,12 @@ function bindEventsOnce() {
 		const refreshButton = safeClosest(event.target, '#refreshIndexBtn');
 		if (refreshButton) {
 			event.preventDefault();
-			setStatusText('正在请求重建索引...');
-			setStatusDetail('等待插件主线程接手索引任务');
-			armBridgeTimeout('重建索引');
-			safePostMessage({ type: 'refreshIndex' });
+			void sendCommand(
+				{ type: 'refreshIndex' },
+				'重建索引',
+				'正在请求重建索引...',
+				'等待插件主线程接手索引任务',
+			);
 			return;
 		}
 
@@ -419,8 +461,12 @@ function boot(attempt) {
 	renderResults();
 	renderHeaderStatus();
 	startReadyPings();
-	armBridgeTimeout('初始化握手');
-	safePostMessage({ type: 'ready' });
+	void sendCommand(
+		{ type: 'ready' },
+		'初始化握手',
+		'正在连接插件主线程...',
+		'等待主线程返回初始化状态',
+	);
 }
 
 webviewApi.onMessage(message => {

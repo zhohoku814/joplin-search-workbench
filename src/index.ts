@@ -627,28 +627,32 @@ joplin.plugins.register({
 					} catch (_error) {
 						// 错误已通过 runtime 状态显示。
 					}
-					return;
+					return { ok: true, action: 'ready' };
 				}
 				if (message?.type === 'search') {
 					await postPanelMessage({ type: 'ack', action: 'search' });
-					await runSearch({ ...lastSearchRequest, ...message.payload });
-					return;
+					void runSearch({ ...lastSearchRequest, ...message.payload });
+					return { ok: true, action: 'search-started' };
 				}
 				if (message?.type === 'refreshIndex') {
 					await postPanelMessage({ type: 'ack', action: 'refreshIndex' });
 					cacheDirty = true;
-					try {
-						await rebuildIndex('手动刷新');
-						if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
-					} catch (_error) {
-						// 错误已通过 runtime 状态显示。
-					}
-					return;
+					void (async () => {
+						try {
+							await rebuildIndex('手动刷新');
+							if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
+						} catch (_error) {
+							// 错误已通过 runtime 状态显示。
+						}
+					})();
+					return { ok: true, action: 'refresh-started' };
 				}
 				if (message?.type === 'openResult') {
 					await postPanelMessage({ type: 'ack', action: 'openResult' });
-					await openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
+					void openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
+					return { ok: true, action: 'open-started' };
 				}
+				return { ok: false, action: 'unknown-message', type: message?.type || 'unknown' };
 			} catch (error) {
 				await emitRuntime(makeTaskProgress({
 					kind: 'index',
@@ -660,6 +664,7 @@ joplin.plugins.register({
 					total: 0,
 					errors: [{ stage: 'panel-message', item: message?.type || 'unknown', message: toErrorMessage(error) }],
 				}));
+				return { ok: false, action: 'error', type: message?.type || 'unknown', error: toErrorMessage(error) };
 			}
 		});
 
