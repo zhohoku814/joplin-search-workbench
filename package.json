@@ -1,6 +1,6 @@
 {
   "name": "joplin-plugin-search-workbench",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "scripts": {
     "test": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath --test .\\test\\search-core.test.js\"", 
     "dist": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\build-plugin.js\""

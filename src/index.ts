@@ -618,31 +618,48 @@ joplin.plugins.register({
 		panelHandle = await joplin.views.panels.create(PANEL_ID);
 
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
-			if (message?.type === 'ready') {
-				await postPanelMessage({ type: 'init', payload: { request: lastSearchRequest, runtimes: latestTaskStates } });
-				try {
-					await ensureIndexReady();
-				} catch (_error) {
-					// 错误已通过 runtime 状态显示。
+			try {
+				if (message?.type === 'ready') {
+					await postPanelMessage({ type: 'ack', action: 'ready' });
+					await postPanelMessage({ type: 'init', payload: { request: lastSearchRequest, runtimes: latestTaskStates } });
+					try {
+						await ensureIndexReady();
+					} catch (_error) {
+						// 错误已通过 runtime 状态显示。
+					}
+					return;
 				}
-				return;
-			}
-			if (message?.type === 'search') {
-				await runSearch({ ...lastSearchRequest, ...message.payload });
-				return;
-			}
-			if (message?.type === 'refreshIndex') {
-				cacheDirty = true;
-				try {
-					await rebuildIndex('手动刷新');
-					if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
-				} catch (_error) {
-					// 错误已通过 runtime 状态显示。
+				if (message?.type === 'search') {
+					await postPanelMessage({ type: 'ack', action: 'search' });
+					await runSearch({ ...lastSearchRequest, ...message.payload });
+					return;
 				}
-				return;
-			}
-			if (message?.type === 'openResult') {
-				await openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
+				if (message?.type === 'refreshIndex') {
+					await postPanelMessage({ type: 'ack', action: 'refreshIndex' });
+					cacheDirty = true;
+					try {
+						await rebuildIndex('手动刷新');
+						if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
+					} catch (_error) {
+						// 错误已通过 runtime 状态显示。
+					}
+					return;
+				}
+				if (message?.type === 'openResult') {
+					await postPanelMessage({ type: 'ack', action: 'openResult' });
+					await openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
+				}
+			} catch (error) {
+				await emitRuntime(makeTaskProgress({
+					kind: 'index',
+					phase: 'panel-message-error',
+					state: 'error',
+					statusText: '面板消息处理失败',
+					detail: toErrorMessage(error),
+					processed: 0,
+					total: 0,
+					errors: [{ stage: 'panel-message', item: message?.type || 'unknown', message: toErrorMessage(error) }],
+				}));
 			}
 		});
 

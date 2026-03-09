@@ -37,6 +37,7 @@ const watchedFieldIds = new Set([
 
 let searchTimer = null;
 let readyPingTimer = null;
+let bridgeTimeoutTimer = null;
 let readyAcked = false;
 let booted = false;
 
@@ -68,11 +69,37 @@ function safeClosest(target, selector) {
 	return target.closest(selector);
 }
 
+function clearBridgeTimeout() {
+	if (bridgeTimeoutTimer) clearTimeout(bridgeTimeoutTimer);
+	bridgeTimeoutTimer = null;
+}
+
+function armBridgeTimeout(actionLabel) {
+	clearBridgeTimeout();
+	bridgeTimeoutTimer = setTimeout(() => {
+		setStatusText(`${actionLabel}没有收到插件回执`);
+		setStatusDetail('不是正常等待，大概率是旧版本仍在运行，或插件主线程启动失败。请重装最新版插件并重启 Joplin。');
+		state.runtimes.index = {
+			kind: 'index',
+			phase: 'bridge-timeout',
+			state: 'error',
+			statusText: `${actionLabel}没有收到插件回执`,
+			detail: '前端发出消息后，主线程没有任何 init / ack / runtime / results 返回。',
+			processed: 0,
+			total: 0,
+			errors: [{ stage: 'bridge', item: actionLabel, message: '未收到主线程回执' }],
+		};
+		renderRuntimeCards();
+		renderHeaderStatus();
+	}, 2500);
+}
+
 function safePostMessage(message) {
 	try {
 		return webviewApi.postMessage(message);
 	} catch (_error) {
 		setStatusText('消息桥发送失败');
+		setStatusDetail('webviewApi.postMessage 调用失败');
 		return Promise.resolve(null);
 	}
 }
@@ -84,6 +111,7 @@ function stopReadyPings() {
 
 function startReadyPings() {
 	stopReadyPings();
+	armBridgeTimeout('初始化握手');
 	let count = 0;
 	readyPingTimer = setInterval(() => {
 		count += 1;
@@ -310,6 +338,8 @@ function sendSearch(immediate) {
 	clearTimeout(searchTimer);
 	const run = () => {
 		setStatusText(state.request.query.trim() ? '正在发起搜索...' : '请输入搜索词。');
+		setStatusDetail('等待插件主线程接手搜索请求');
+		armBridgeTimeout('搜索');
 		safePostMessage({ type: 'search', payload: { ...state.request } });
 	};
 	if (immediate) {
@@ -355,6 +385,8 @@ function bindEventsOnce() {
 		if (refreshButton) {
 			event.preventDefault();
 			setStatusText('正在请求重建索引...');
+			setStatusDetail('等待插件主线程接手索引任务');
+			armBridgeTimeout('重建索引');
 			safePostMessage({ type: 'refreshIndex' });
 			return;
 		}
@@ -387,11 +419,18 @@ function boot(attempt) {
 	renderResults();
 	renderHeaderStatus();
 	startReadyPings();
+	armBridgeTimeout('初始化握手');
 	safePostMessage({ type: 'ready' });
 }
 
 webviewApi.onMessage(message => {
 	if (!message) return;
+	clearBridgeTimeout();
+
+	if (message.type === 'ack') {
+		readyAcked = true;
+		return;
+	}
 
 	if (message.type === 'init') {
 		readyAcked = true;
