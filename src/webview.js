@@ -2,82 +2,28 @@ function $(id) {
 	return document.getElementById(id);
 }
 
-function protocol() {
-	if (typeof SearchWorkbenchPanelState !== 'undefined' && SearchWorkbenchPanelState) {
-		return SearchWorkbenchPanelState;
-	}
+function createDefaultRequest() {
 	return {
-		createDefaultRequest: () => ({
-			query: '',
-			mode: 'smart',
-			scope: 'all',
-			caseSensitive: false,
-			noteType: 'all',
-			notebookQuery: '',
-			dateField: 'updated',
-			dateFrom: '',
-			dateTo: '',
-			sortBy: 'relevance',
-			sortDir: 'desc',
-			groupBy: 'none',
-		}),
-		cloneRequest: input => ({
-			query: '',
-			mode: 'smart',
-			scope: 'all',
-			caseSensitive: false,
-			noteType: 'all',
-			notebookQuery: '',
-			dateField: 'updated',
-			dateFrom: '',
-			dateTo: '',
-			sortBy: 'relevance',
-			sortDir: 'desc',
-			groupBy: 'none',
-			...(input || {}),
-		}),
-		createClientState: initial => ({
-			server: initial || { request: {}, response: null, runtimes: { index: null, search: null }, meta: {} },
-			draftRequest: {
-				query: '',
-				mode: 'smart',
-				scope: 'all',
-				caseSensitive: false,
-				noteType: 'all',
-				notebookQuery: '',
-				dateField: 'updated',
-				dateFrom: '',
-				dateTo: '',
-				sortBy: 'relevance',
-				sortDir: 'desc',
-				groupBy: 'none',
-				...((initial && initial.request) || {}),
-			},
-		}),
-		receiveServerState: (state, message) => {
-			if (!message || message.name !== 'state') return state;
-			const next = {
-				...state,
-				server: message.payload || { request: {}, response: null, runtimes: { index: null, search: null }, meta: {} },
-			};
-			if (message.syncForm) next.draftRequest = { ...next.draftRequest, ...((message.payload && message.payload.request) || {}) };
-			return next;
-		},
-		updateDraftRequest: (state, patch) => ({
-			...state,
-			draftRequest: {
-				...state.draftRequest,
-				...(patch || {}),
-			},
-		}),
-		};
+		query: '',
+		mode: 'smart',
+		scope: 'all',
+		caseSensitive: false,
+		noteType: 'all',
+		notebookQuery: '',
+		dateField: 'updated',
+		dateFrom: '',
+		dateTo: '',
+		sortBy: 'relevance',
+		sortDir: 'desc',
+		groupBy: 'none',
+	};
 }
 
 function readInitialState() {
 	const node = $('initialState');
 	if (!node) {
 		return {
-			request: protocol().createDefaultRequest(),
+			request: createDefaultRequest(),
 			response: null,
 			runtimes: { index: null, search: null },
 			meta: {},
@@ -85,10 +31,16 @@ function readInitialState() {
 	}
 
 	try {
-		return JSON.parse(node.textContent || '{}');
+		const parsed = JSON.parse(node.textContent || '{}');
+		return {
+			request: { ...createDefaultRequest(), ...(parsed.request || {}) },
+			response: Object.prototype.hasOwnProperty.call(parsed, 'response') ? parsed.response : null,
+			runtimes: parsed.runtimes || { index: null, search: null },
+			meta: parsed.meta || {},
+		};
 	} catch (_error) {
 		return {
-			request: protocol().createDefaultRequest(),
+			request: createDefaultRequest(),
 			response: null,
 			runtimes: { index: null, search: null },
 			meta: {},
@@ -96,7 +48,9 @@ function readInitialState() {
 	}
 }
 
-let state = protocol().createClientState(readInitialState());
+const state = readInitialState();
+let draftRequest = { ...createDefaultRequest(), ...(state.request || {}) };
+let draftTimer = null;
 
 function setStatusText(text) {
 	const node = $('statusText');
@@ -167,7 +121,7 @@ function runtimePriority(runtime) {
 }
 
 function getPrimaryRuntime() {
-	const runtimes = state.server && state.server.runtimes ? state.server.runtimes : { index: null, search: null };
+	const runtimes = state.runtimes || { index: null, search: null };
 	const candidates = [runtimes.search, runtimes.index].filter(Boolean);
 	candidates.sort((a, b) => runtimePriority(b) - runtimePriority(a));
 	return candidates[0] || null;
@@ -175,20 +129,19 @@ function getPrimaryRuntime() {
 
 function renderHeaderStatus() {
 	const primary = getPrimaryRuntime();
-	const response = state.server ? state.server.response : null;
 	if (primary) {
 		setStatusText(primary.statusText || '准备就绪');
 		setStatusDetail(primary.detail || '');
-	} else if (response && response.statusText) {
-		setStatusText(response.statusText);
+	} else if (state.response && state.response.statusText) {
+		setStatusText(state.response.statusText);
 		setStatusDetail('');
 	} else {
 		setStatusText('准备就绪');
 		setStatusDetail('');
 	}
 
-	if (response) {
-		setMetaText(`分组 ${response.groups.length} · 结果 ${response.resultCount}`);
+	if (state.response) {
+		setMetaText(`分组 ${state.response.groups.length} · 结果 ${state.response.resultCount}`);
 	} else {
 		setMetaText('');
 	}
@@ -197,11 +150,9 @@ function renderHeaderStatus() {
 function renderRuntimeCards() {
 	const root = $('runtimeRoot');
 	if (!root) return;
-
-	const runtimes = state.server && state.server.runtimes ? state.server.runtimes : { index: null, search: null };
 	const order = ['index', 'search'];
 	const cards = order
-		.map(kind => runtimes[kind])
+		.map(kind => (state.runtimes || {})[kind])
 		.filter(Boolean)
 		.map(runtime => {
 			const percentText = runtime.percent == null ? '—' : `${runtime.percent}%`;
@@ -226,28 +177,24 @@ function renderRuntimeCards() {
 				</section>
 			`;
 		});
-
 	root.innerHTML = cards.length ? cards.join('') : '';
 }
 
 function renderResults() {
 	const root = $('resultsRoot');
 	if (!root) return;
-
-	const response = state.server ? state.server.response : null;
-	if (!response) {
+	if (!state.response) {
 		root.innerHTML = '<div class="empty">还没有结果。</div>';
 		renderHeaderStatus();
 		return;
 	}
-
-	renderHeaderStatus();
-	if (!response.groups.length) {
+	if (!state.response.groups.length) {
 		root.innerHTML = '<div class="empty">没有匹配结果。</div>';
+		renderHeaderStatus();
 		return;
 	}
 
-	root.innerHTML = response.groups.map(group => `
+	root.innerHTML = state.response.groups.map(group => `
 		<section class="result-group">
 			<div class="group-title">${escapeHtml(group.label)} <span>${group.items.length}</span></div>
 			<div class="group-list">
@@ -286,27 +233,27 @@ function renderResults() {
 			</div>
 		</section>
 	`).join('');
+	renderHeaderStatus();
 }
 
 function applyDraftToForm() {
-	const request = state.draftRequest || protocol().createDefaultRequest();
 	if (!$('queryInput')) return;
-	$('queryInput').value = request.query || '';
-	$('modeSelect').value = request.mode || 'smart';
-	$('scopeSelect').value = request.scope || 'all';
-	$('sortBySelect').value = request.sortBy || 'relevance';
-	$('sortDirSelect').value = request.sortDir || 'desc';
-	$('groupBySelect').value = request.groupBy || 'none';
-	$('notebookInput').value = request.notebookQuery || '';
-	$('noteTypeSelect').value = request.noteType || 'all';
-	$('dateFieldSelect').value = request.dateField || 'updated';
-	$('dateFromInput').value = request.dateFrom || '';
-	$('dateToInput').value = request.dateTo || '';
-	$('caseSensitiveInput').checked = !!request.caseSensitive;
+	$('queryInput').value = draftRequest.query || '';
+	$('modeSelect').value = draftRequest.mode || 'smart';
+	$('scopeSelect').value = draftRequest.scope || 'all';
+	$('sortBySelect').value = draftRequest.sortBy || 'relevance';
+	$('sortDirSelect').value = draftRequest.sortDir || 'desc';
+	$('groupBySelect').value = draftRequest.groupBy || 'none';
+	$('notebookInput').value = draftRequest.notebookQuery || '';
+	$('noteTypeSelect').value = draftRequest.noteType || 'all';
+	$('dateFieldSelect').value = draftRequest.dateField || 'updated';
+	$('dateFromInput').value = draftRequest.dateFrom || '';
+	$('dateToInput').value = draftRequest.dateTo || '';
+	$('caseSensitiveInput').checked = !!draftRequest.caseSensitive;
 }
 
 function updateDraftFromForm() {
-	state = protocol().updateDraftRequest(state, {
+	draftRequest = {
 		query: $('queryInput') ? $('queryInput').value : '',
 		mode: $('modeSelect') ? $('modeSelect').value : 'smart',
 		scope: $('scopeSelect') ? $('scopeSelect').value : 'all',
@@ -319,50 +266,35 @@ function updateDraftFromForm() {
 		sortBy: $('sortBySelect') ? $('sortBySelect').value : 'relevance',
 		sortDir: $('sortDirSelect') ? $('sortDirSelect').value : 'desc',
 		groupBy: $('groupBySelect') ? $('groupBySelect').value : 'none',
-	});
+	};
 }
 
-function renderAll() {
-	renderRuntimeCards();
-	renderResults();
-	renderHeaderStatus();
+function scheduleDraftSync() {
+	updateDraftFromForm();
+	clearTimeout(draftTimer);
+	draftTimer = setTimeout(() => {
+		void postCommand({ name: 'draftUpdate', payload: { ...draftRequest } });
+	}, 60);
 }
 
 async function sendSearch() {
 	updateDraftFromForm();
-	if (!state.draftRequest.query.trim()) {
+	if (!draftRequest.query.trim()) {
 		setStatusText('请输入搜索词。');
 		setStatusDetail('');
 		return;
 	}
 	setStatusText('正在发起搜索...');
 	setStatusDetail('请求已经发给插件主线程，等待结果返回');
-	const response = await postCommand({ name: 'search', payload: { ...state.draftRequest } });
-	if (response && response.accepted === false) {
-		setStatusText('搜索请求未被接受');
-		setStatusDetail(response.message || '插件主线程拒绝了请求');
-	}
+	await postCommand({ name: 'search', payload: { ...draftRequest } });
 }
 
 async function sendRefreshIndex() {
+	updateDraftFromForm();
+	await postCommand({ name: 'draftUpdate', payload: { ...draftRequest } });
 	setStatusText('正在请求重建索引...');
 	setStatusDetail('请求已经发给插件主线程，等待状态更新');
-	const response = await postCommand({ name: 'refreshIndex' });
-	if (response && response.accepted === false) {
-		setStatusText('重建索引请求未被接受');
-		setStatusDetail(response.message || '插件主线程拒绝了请求');
-	}
-}
-
-function bindPanelMessages() {
-	if (typeof webviewApi === 'undefined' || !webviewApi || typeof webviewApi.onMessage !== 'function') return;
-	webviewApi.onMessage(message => {
-		state = protocol().receiveServerState(state, message);
-		if (message && message.name === 'state' && message.syncForm) {
-			applyDraftToForm();
-		}
-		renderAll();
-	});
+	await postCommand({ name: 'refreshIndex' });
 }
 
 document.addEventListener('keydown', event => {
@@ -371,6 +303,36 @@ document.addEventListener('keydown', event => {
 	if (event.key !== 'Enter') return;
 	event.preventDefault();
 	void sendSearch();
+}, true);
+
+document.addEventListener('input', event => {
+	const target = event.target;
+	if (!target || !target.id) return;
+	if (![
+		'queryInput',
+		'notebookInput',
+		'dateFromInput',
+		'dateToInput',
+	].includes(target.id)) return;
+	scheduleDraftSync();
+}, true);
+
+document.addEventListener('change', event => {
+	const target = event.target;
+	if (!target || !target.id) return;
+	if (![
+		'modeSelect',
+		'scopeSelect',
+		'sortBySelect',
+		'sortDirSelect',
+		'groupBySelect',
+		'noteTypeSelect',
+		'dateFieldSelect',
+		'caseSensitiveInput',
+		'dateFromInput',
+		'dateToInput',
+	].includes(target.id)) return;
+	scheduleDraftSync();
 }, true);
 
 document.addEventListener('click', event => {
@@ -400,33 +362,8 @@ document.addEventListener('click', event => {
 	});
 }, true);
 
-document.addEventListener('change', event => {
-	const target = event.target;
-	if (!target || !target.id) return;
-	if (![
-		'modeSelect',
-		'scopeSelect',
-		'sortBySelect',
-		'sortDirSelect',
-		'groupBySelect',
-		'notebookInput',
-		'noteTypeSelect',
-		'dateFieldSelect',
-		'dateFromInput',
-		'dateToInput',
-		'caseSensitiveInput',
-	].includes(target.id)) return;
-	updateDraftFromForm();
-}, true);
-
-document.addEventListener('input', event => {
-	const target = event.target;
-	if (!target || !target.id) return;
-	if (!['queryInput', 'notebookInput', 'dateFromInput', 'dateToInput'].includes(target.id)) return;
-	updateDraftFromForm();
-}, true);
-
-bindPanelMessages();
 applyDraftToForm();
-renderAll();
+renderRuntimeCards();
+renderResults();
+renderHeaderStatus();
 void postCommand({ name: 'ready' });

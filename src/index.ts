@@ -108,7 +108,8 @@ interface PanelModelPatch {
 }
 
 let panelHandle: any = null;
-let panelReady = false;
+let panelRenderRunning = false;
+let panelRenderRequested = false;
 let cachedFolders: CachedFolder[] = [];
 let cachedNotes: CachedNote[] = [];
 let cacheDirty = true;
@@ -282,24 +283,28 @@ async function showToast(message: string) {
 
 async function renderPanelShell() {
 	if (!panelHandle) return;
-	panelReady = false;
 	await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 }
 
-function pushPanelState(options: { syncForm?: boolean } = {}) {
-	if (!panelHandle || !panelReady) return;
+async function flushPanelRender() {
+	if (!panelHandle || panelRenderRunning) return;
+	panelRenderRunning = true;
 	try {
-		joplin.views.panels.postMessage(panelHandle, {
-			name: 'state',
-			syncForm: !!options.syncForm,
-			payload: serialisePanelModel(),
-		});
-	} catch (_error) {
-		void renderPanelShell();
+		do {
+			panelRenderRequested = false;
+			await renderPanelShell();
+		} while (panelRenderRequested);
+	} finally {
+		panelRenderRunning = false;
 	}
 }
 
-function updatePanelModel(patch: PanelModelPatch, options: { syncForm?: boolean; push?: boolean } = {}) {
+function schedulePanelRender() {
+	panelRenderRequested = true;
+	void flushPanelRender();
+}
+
+function updatePanelModel(patch: PanelModelPatch, options: { render?: boolean } = {}) {
 	panelModel = {
 		...panelModel,
 		...patch,
@@ -311,7 +316,7 @@ function updatePanelModel(patch: PanelModelPatch, options: { syncForm?: boolean;
 			revision: panelModel.meta.revision + 1,
 		},
 	};
-	if (options.push !== false) pushPanelState({ syncForm: options.syncForm });
+	if (options.render !== false) schedulePanelRender();
 }
 
 function setRuntime(kind: RuntimeKind, runtime: any) {
@@ -728,8 +733,13 @@ joplin.plugins.register({
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			try {
 				if (message?.name === 'ready') {
-					panelReady = true;
-					pushPanelState({ syncForm: true });
+					return { accepted: true };
+				}
+				if (message?.name === 'draftUpdate') {
+					updatePanelModel({
+						request: cloneRequest(message.payload || createDefaultRequest()) as SearchRequest,
+						meta: { lastAction: '收到表单草稿更新' },
+					}, { render: false });
 					return { accepted: true };
 				}
 				if (message?.name === 'search') {
