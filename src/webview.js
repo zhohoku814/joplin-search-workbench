@@ -50,22 +50,6 @@ function readInitialState() {
 }
 
 const state = readInitialState();
-const watchedFieldIds = new Set([
-	'queryInput',
-	'modeSelect',
-	'scopeSelect',
-	'sortBySelect',
-	'sortDirSelect',
-	'groupBySelect',
-	'notebookInput',
-	'noteTypeSelect',
-	'dateFieldSelect',
-	'dateFromInput',
-	'dateToInput',
-	'caseSensitiveInput',
-]);
-
-let searchTimer = null;
 
 function setStatusText(text) {
 	const node = $('statusText');
@@ -94,26 +78,6 @@ function safePostMessage(message) {
 		setStatusText('消息发送失败');
 		setStatusDetail('webviewApi.postMessage 调用失败');
 	}
-}
-
-function mergeIncomingState(message) {
-	if (!message || message.type !== 'state') return;
-	const payload = message.payload || {};
-	if (payload.request && typeof payload.request === 'object') {
-		state.request = { ...state.request, ...payload.request };
-	}
-	if (Object.prototype.hasOwnProperty.call(payload, 'response')) {
-		state.response = payload.response;
-	}
-	if (payload.runtimes && typeof payload.runtimes === 'object') {
-		state.runtimes = { ...state.runtimes, ...payload.runtimes };
-	}
-	if (message.syncForm) {
-		applyRequestToForm(state.request || {});
-	}
-	renderRuntimeCards();
-	renderResults();
-	renderHeaderStatus();
 }
 
 function escapeHtml(text) {
@@ -306,51 +270,31 @@ function updateRequestFromForm() {
 	};
 }
 
-function sendSearch(immediate) {
+function sendSearch() {
 	updateRequestFromForm();
-	clearTimeout(searchTimer);
-	const run = () => {
-		if (!state.request.query.trim()) {
-			setStatusText('请输入搜索词。');
-			setStatusDetail('');
-			return;
-		}
-		setStatusText('正在发起搜索...');
-		setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
-		safePostMessage({ type: 'search', payload: { ...state.request } });
-	};
-	if (immediate) {
-		run();
-	} else {
-		searchTimer = setTimeout(run, 180);
+	if (!state.request.query.trim()) {
+		setStatusText('请输入搜索词。');
+		setStatusDetail('');
+		return;
 	}
+	setStatusText('正在发起搜索...');
+	setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
+	safePostMessage({ type: 'search', payload: { ...state.request } });
 }
-
-document.addEventListener('input', event => {
-	const target = event.target;
-	if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
-	sendSearch(false);
-}, true);
-
-document.addEventListener('change', event => {
-	const target = event.target;
-	if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
-	sendSearch(false);
-}, true);
 
 document.addEventListener('keydown', event => {
 	const target = event.target;
 	if (!target || target.id !== 'queryInput') return;
 	if (event.key !== 'Enter') return;
 	event.preventDefault();
-	sendSearch(true);
+	sendSearch();
 }, true);
 
 document.addEventListener('click', event => {
 	const searchButton = safeClosest(event.target, '#searchBtn');
 	if (searchButton) {
 		event.preventDefault();
-		sendSearch(true);
+		sendSearch();
 		return;
 	}
 
@@ -374,12 +318,6 @@ document.addEventListener('click', event => {
 		},
 	});
 }, true);
-
-if (typeof webviewApi !== 'undefined' && webviewApi && typeof webviewApi.onMessage === 'function') {
-	webviewApi.onMessage(message => {
-		mergeIncomingState(message);
-	});
-}
 
 applyRequestToForm(state.request || {});
 renderRuntimeCards();

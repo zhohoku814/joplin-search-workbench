@@ -243,21 +243,9 @@ async function showToast(message: string) {
 	await joplin.views.dialogs.showToast({ message, type: ToastType.Info });
 }
 
-function pushPanelState(options: { syncForm?: boolean } = {}) {
+async function refreshPanel() {
 	if (!panelHandle) return;
-	try {
-		joplin.views.panels.postMessage(panelHandle, {
-			type: 'state',
-			syncForm: !!options.syncForm,
-			payload: {
-				request: lastSearchRequest,
-				response: lastSearchResponse,
-				runtimes: latestTaskStates,
-			},
-		});
-	} catch (_error) {
-		// 面板可能尚未准备好；等 webview ready 后会再同步一次完整状态。
-	}
+	await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 }
 
 async function emitRuntime(progress: any) {
@@ -266,7 +254,7 @@ async function emitRuntime(progress: any) {
 		...latestTaskStates,
 		[progress.kind]: progress,
 	};
-	pushPanelState();
+	await refreshPanel();
 }
 
 function buildFolderPaths(folders: Array<{ id: string; title: string; parent_id?: string }>): CachedFolder[] {
@@ -506,19 +494,12 @@ async function rebuildIndex(reason = '手动刷新') {
 	return currentIndexPromise;
 }
 
-function scheduleBackgroundReindex(reason = '内容变化') {
+function markIndexDirty(_reason = '内容变化') {
 	cacheDirty = true;
-	if (backgroundReindexTimer) clearTimeout(backgroundReindexTimer);
-	backgroundReindexTimer = setTimeout(async () => {
-		try {
-			await rebuildIndex(reason);
-			if (lastSearchRequest.query.trim()) {
-				await runSearch(lastSearchRequest);
-			}
-		} catch (_error) {
-			// 已通过 runtime 状态展示错误，这里不再重复抛出。
-		}
-	}, 1200);
+	if (backgroundReindexTimer) {
+		clearTimeout(backgroundReindexTimer);
+		backgroundReindexTimer = null;
+	}
 }
 
 async function ensureIndexReady() {
@@ -527,7 +508,8 @@ async function ensureIndexReady() {
 		return;
 	}
 	if (cacheDirty || !cachedNotes.length) {
-		await rebuildIndex(cacheDirty ? '自动更新' : '初始化');
+		const reason = cachedNotes.length ? '自动更新' : '首次建立';
+		await rebuildIndex(reason);
 	}
 }
 
@@ -597,7 +579,7 @@ async function runSearch(request: SearchRequest) {
 			resultCount: 0,
 			groups: [],
 		};
-		pushPanelState();
+		await refreshPanel();
 		return;
 	}
 
@@ -642,7 +624,6 @@ joplin.plugins.register({
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			try {
 				if (message?.type === 'ready') {
-					pushPanelState({ syncForm: true });
 					return;
 				}
 				if (message?.type === 'search') {
@@ -716,18 +697,26 @@ joplin.plugins.register({
 		});
 
 		await joplin.workspace.onNoteChange(async () => {
-			scheduleBackgroundReindex('笔记变化');
+			markIndexDirty('笔记变化');
 		});
 
 		await joplin.workspace.onSyncComplete(async () => {
-			scheduleBackgroundReindex('同步完成');
+			markIndexDirty('同步完成');
 		});
 
-		try {
-			await rebuildIndex('初始化');
-		} catch (_error) {
-			// 错误已通过 runtime 状态显示。
-		}
+		latestTaskStates = {
+			index: makeTaskProgress({
+				kind: 'index',
+				phase: 'idle',
+				state: 'warning',
+				statusText: '索引尚未建立',
+				detail: '首次搜索会自动建立索引；也可以先点“重建索引”。',
+				processed: 0,
+				total: 0,
+			}),
+			search: null,
+		};
+		await refreshPanel();
 		await recordSelectedNoteUsage();
 		await joplin.views.panels.show(panelHandle, true);
 	},
