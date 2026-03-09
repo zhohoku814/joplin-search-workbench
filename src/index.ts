@@ -243,9 +243,21 @@ async function showToast(message: string) {
 	await joplin.views.dialogs.showToast({ message, type: ToastType.Info });
 }
 
-async function refreshPanel() {
+function pushPanelState(options: { syncForm?: boolean } = {}) {
 	if (!panelHandle) return;
-	await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
+	try {
+		joplin.views.panels.postMessage(panelHandle, {
+			type: 'state',
+			syncForm: !!options.syncForm,
+			payload: {
+				request: lastSearchRequest,
+				response: lastSearchResponse,
+				runtimes: latestTaskStates,
+			},
+		});
+	} catch (_error) {
+		// 面板可能尚未准备好；等 webview ready 后会再同步一次完整状态。
+	}
 }
 
 async function emitRuntime(progress: any) {
@@ -254,7 +266,7 @@ async function emitRuntime(progress: any) {
 		...latestTaskStates,
 		[progress.kind]: progress,
 	};
-	await refreshPanel();
+	pushPanelState();
 }
 
 function buildFolderPaths(folders: Array<{ id: string; title: string; parent_id?: string }>): CachedFolder[] {
@@ -585,7 +597,7 @@ async function runSearch(request: SearchRequest) {
 			resultCount: 0,
 			groups: [],
 		};
-		await refreshPanel();
+		pushPanelState();
 		return;
 	}
 
@@ -630,6 +642,7 @@ joplin.plugins.register({
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			try {
 				if (message?.type === 'ready') {
+					pushPanelState({ syncForm: true });
 					return;
 				}
 				if (message?.type === 'search') {

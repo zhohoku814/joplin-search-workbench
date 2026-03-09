@@ -96,6 +96,26 @@ function safePostMessage(message) {
 	}
 }
 
+function mergeIncomingState(message) {
+	if (!message || message.type !== 'state') return;
+	const payload = message.payload || {};
+	if (payload.request && typeof payload.request === 'object') {
+		state.request = { ...state.request, ...payload.request };
+	}
+	if (Object.prototype.hasOwnProperty.call(payload, 'response')) {
+		state.response = payload.response;
+	}
+	if (payload.runtimes && typeof payload.runtimes === 'object') {
+		state.runtimes = { ...state.runtimes, ...payload.runtimes };
+	}
+	if (message.syncForm) {
+		applyRequestToForm(state.request || {});
+	}
+	renderRuntimeCards();
+	renderResults();
+	renderHeaderStatus();
+}
+
 function escapeHtml(text) {
 	return String(text || '')
 		.replace(/&/g, '&amp;')
@@ -354,6 +374,12 @@ document.addEventListener('click', event => {
 		},
 	});
 }, true);
+
+if (typeof webviewApi !== 'undefined' && webviewApi && typeof webviewApi.onMessage === 'function') {
+	webviewApi.onMessage(message => {
+		mergeIncomingState(message);
+	});
+}
 
 applyRequestToForm(state.request || {});
 renderRuntimeCards();
