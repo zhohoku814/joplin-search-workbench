@@ -704,19 +704,11 @@ joplin.plugins.register({
 			markIndexDirty('同步完成');
 		});
 
-		latestTaskStates = {
-			index: makeTaskProgress({
-				kind: 'index',
-				phase: 'idle',
-				state: 'warning',
-				statusText: '索引尚未建立',
-				detail: '首次搜索会自动建立索引；也可以先点“重建索引”。',
-				processed: 0,
-				total: 0,
-			}),
-			search: null,
-		};
-		await refreshPanel();
+		try {
+			await rebuildIndex('初始化');
+		} catch (_error) {
+			// 错误已通过 runtime 状态显示。
+		}
 		await recordSelectedNoteUsage();
 		await joplin.views.panels.show(panelHandle, true);
 	},
