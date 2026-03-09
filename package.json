@@ -1,11 +1,11 @@
 {
   "name": "joplin-plugin-search-workbench",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "scripts": {
     "test": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\run-node-tests.js\"", 
     "dist": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\build-plugin.js\""
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "keywords": [
     "joplin-plugin"
   ],

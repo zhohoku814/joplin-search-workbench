@@ -2,12 +2,12 @@
   "manifest_version": 1,
   "id": "com.openclaw.searchWorkbench",
   "app_min_version": "2.8",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "name": "Search Workbench",
   "description": "VS Code 风格的 Joplin 搜索工作台：全文片段、高亮、分组、排序、正则、时间过滤。",
   "author": "OpenClaw",
-  "homepage_url": "https://joplinapp.org",
-  "repository_url": "https://github.com/laurent22/joplin",
+  "homepage_url": "https://github.com/zhohoku814/joplin-search-workbench",
+  "repository_url": "https://github.com/zhohoku814/joplin-search-workbench",
   "keywords": [
     "search",
     "find",
@@ -22,6 +22,6 @@
   "platforms": [
     "desktop"
   ],
-  "_publish_hash": "sha256:690ee41e42b3ca7c184414b48f04d2cf96f1c0da242373e57336db56b4f098e9",
+  "_publish_hash": "sha256:58e96159a28c1ad6ab6408fbb8b6f44bb5e9b534671334097244b69fad2349bd",
   "_publish_commit": ""
 }
