@@ -1,25 +1,55 @@
-const state = {
-	request: {
-		query: '',
-		mode: 'smart',
-		scope: 'all',
-		caseSensitive: false,
-		noteType: 'all',
-		notebookQuery: '',
-		dateField: 'updated',
-		dateFrom: '',
-		dateTo: '',
-		sortBy: 'relevance',
-		sortDir: 'desc',
-		groupBy: 'none',
-	},
-	response: null,
-	runtimes: {
-		index: null,
-		search: null,
-	},
-};
+function $(id) {
+	return document.getElementById(id);
+}
 
+function readInitialState() {
+	const node = $('initialState');
+	if (!node) {
+		return {
+			request: {
+				query: '',
+				mode: 'smart',
+				scope: 'all',
+				caseSensitive: false,
+				noteType: 'all',
+				notebookQuery: '',
+				dateField: 'updated',
+				dateFrom: '',
+				dateTo: '',
+				sortBy: 'relevance',
+				sortDir: 'desc',
+				groupBy: 'none',
+			},
+			response: null,
+			runtimes: { index: null, search: null },
+		};
+	}
+
+	try {
+		return JSON.parse(node.textContent || '{}');
+	} catch (_error) {
+		return {
+			request: {
+				query: '',
+				mode: 'smart',
+				scope: 'all',
+				caseSensitive: false,
+				noteType: 'all',
+				notebookQuery: '',
+				dateField: 'updated',
+				dateFrom: '',
+				dateTo: '',
+				sortBy: 'relevance',
+				sortDir: 'desc',
+				groupBy: 'none',
+			},
+			response: null,
+			runtimes: { index: null, search: null },
+		};
+	}
+}
+
+const state = readInitialState();
 const watchedFieldIds = new Set([
 	'queryInput',
 	'modeSelect',
@@ -36,18 +66,6 @@ const watchedFieldIds = new Set([
 ]);
 
 let searchTimer = null;
-let readyPingTimer = null;
-let bridgeTimeoutTimer = null;
-let readyAcked = false;
-let booted = false;
-
-function $(id) {
-	return document.getElementById(id);
-}
-
-function hasCoreDom() {
-	return !!$('queryInput') && !!$('resultsRoot') && !!$('statusText') && !!$('runtimeRoot');
-}
 
 function setStatusText(text) {
 	const node = $('statusText');
@@ -69,88 +87,13 @@ function safeClosest(target, selector) {
 	return target.closest(selector);
 }
 
-function clearBridgeTimeout() {
-	if (bridgeTimeoutTimer) clearTimeout(bridgeTimeoutTimer);
-	bridgeTimeoutTimer = null;
-}
-
-function armBridgeTimeout(actionLabel) {
-	clearBridgeTimeout();
-	bridgeTimeoutTimer = setTimeout(() => {
-		setStatusText(`${actionLabel}没有收到插件回执`);
-		setStatusDetail('不是正常等待，大概率是旧版本仍在运行，或插件主线程启动失败。请重装最新版插件并重启 Joplin。');
-		state.runtimes.index = {
-			kind: 'index',
-			phase: 'bridge-timeout',
-			state: 'error',
-			statusText: `${actionLabel}没有收到插件回执`,
-			detail: '前端发出消息后，主线程没有任何 init / ack / runtime / results 返回。',
-			processed: 0,
-			total: 0,
-			errors: [{ stage: 'bridge', item: actionLabel, message: '未收到主线程回执' }],
-		};
-		renderRuntimeCards();
-		renderHeaderStatus();
-	}, 2500);
-}
-
 function safePostMessage(message) {
 	try {
-		return Promise.resolve(webviewApi.postMessage(message));
+		webviewApi.postMessage(message);
 	} catch (_error) {
-		setStatusText('消息桥发送失败');
+		setStatusText('消息发送失败');
 		setStatusDetail('webviewApi.postMessage 调用失败');
-		return Promise.resolve({ ok: false, action: 'post-exception' });
 	}
-}
-
-function sendCommand(message, actionLabel, waitingText, waitingDetail) {
-	setStatusText(waitingText);
-	setStatusDetail(waitingDetail);
-	armBridgeTimeout(actionLabel);
-	return safePostMessage(message).then(response => {
-		if (response && response.ok) {
-			clearBridgeTimeout();
-			return response;
-		}
-		clearBridgeTimeout();
-		const errorText = response && response.error ? response.error : '主线程没有确认接单';
-		setStatusText(`${actionLabel}未被主线程确认`);
-		setStatusDetail(errorText);
-		state.runtimes.index = {
-			kind: 'index',
-			phase: 'command-rejected',
-			state: 'error',
-			statusText: `${actionLabel}未被主线程确认`,
-			detail: errorText,
-			processed: 0,
-			total: 0,
-			errors: [{ stage: 'command', item: actionLabel, message: errorText }],
-		};
-		renderRuntimeCards();
-		renderHeaderStatus();
-		return response;
-	}).catch(error => {
-		clearBridgeTimeout();
-		setStatusText(`${actionLabel}消息发送失败`);
-		setStatusDetail(String(error && error.message ? error.message : error));
-		return { ok: false, action: 'promise-rejected', error: String(error && error.message ? error.message : error) };
-	});
-}
-
-function stopReadyPings() {
-	if (readyPingTimer) clearInterval(readyPingTimer);
-	readyPingTimer = null;
-}
-
-function startReadyPings() {
-	stopReadyPings();
-	let count = 0;
-	readyPingTimer = setInterval(() => {
-		count += 1;
-		safePostMessage({ type: 'ready' });
-		if (readyAcked || count >= 20) stopReadyPings();
-	}, 500);
 }
 
 function escapeHtml(text) {
@@ -219,7 +162,7 @@ function renderHeaderStatus() {
 
 function renderRuntimeCards() {
 	const root = $('runtimeRoot');
-	if (!root) return false;
+	if (!root) return;
 
 	const order = ['index', 'search'];
 	const cards = order
@@ -250,103 +193,80 @@ function renderRuntimeCards() {
 		});
 
 	root.innerHTML = cards.length ? cards.join('') : '';
-	return true;
 }
 
 function renderResults() {
 	const root = $('resultsRoot');
-	if (!root) return false;
+	if (!root) return;
 
 	const response = state.response;
 	if (!response) {
 		root.innerHTML = '<div class="empty">还没有结果。</div>';
 		renderHeaderStatus();
-		return true;
+		return;
 	}
 
 	renderHeaderStatus();
 	if (!response.groups.length) {
 		root.innerHTML = '<div class="empty">没有匹配结果。</div>';
-		return true;
+		return;
 	}
 
-	root.innerHTML = response.groups.map(group => {
-		return `
-			<section class="result-group">
-				<div class="group-title">${escapeHtml(group.label)} <span>${group.items.length}</span></div>
-				<div class="group-list">
-					${group.items.map(item => {
-						const snippets = (item.snippets || []).map(snippet => `
-							<button class="snippet-item" data-note-id="${item.noteId}" data-section-slug="${snippet.sectionSlug || ''}" data-line="${snippet.line || 0}">
-								<div class="snippet-meta">
-									<span class="badge">${escapeHtml(snippet.blockType)}</span>
-									<span>行 ${snippet.line || '标题'}</span>
-									${snippet.sectionText ? `<span class="section">${escapeHtml(snippet.sectionText)}</span>` : ''}
+	root.innerHTML = response.groups.map(group => `
+		<section class="result-group">
+			<div class="group-title">${escapeHtml(group.label)} <span>${group.items.length}</span></div>
+			<div class="group-list">
+				${group.items.map(item => {
+					const snippets = (item.snippets || []).map(snippet => `
+						<button class="snippet-item" data-note-id="${item.noteId}" data-section-slug="${snippet.sectionSlug || ''}" data-line="${snippet.line || 0}">
+							<div class="snippet-meta">
+								<span class="badge">${escapeHtml(snippet.blockType)}</span>
+								<span>行 ${snippet.line || '标题'}</span>
+								${snippet.sectionText ? `<span class="section">${escapeHtml(snippet.sectionText)}</span>` : ''}
+							</div>
+							<div class="snippet-text">${highlightText(snippet.text, snippet.highlights)}</div>
+						</button>
+					`).join('');
+					return `
+						<article class="result-item">
+							<div class="result-header">
+								<div>
+									<div class="result-title">${highlightText(item.title, (item.snippets && item.snippets[0] && item.snippets[0].highlights) || [])}</div>
+									<div class="result-path">${escapeHtml(item.folderPath)} · ${item.noteType === 'todo' ? '待办' : '笔记'}</div>
 								</div>
-								<div class="snippet-text">${highlightText(snippet.text, snippet.highlights)}</div>
-							</button>
-						`).join('');
-
-						return `
-							<article class="result-item">
-								<div class="result-header">
-									<div>
-										<div class="result-title">${highlightText(item.title, (item.snippets && item.snippets[0] && item.snippets[0].highlights) || [])}</div>
-										<div class="result-path">${escapeHtml(item.folderPath)} · ${item.noteType === 'todo' ? '待办' : '笔记'}</div>
-									</div>
-									<div class="result-side">
-										<div>分数 ${Math.round(item.score)}</div>
-										<div>使用 ${item.usageCount || 0}</div>
-									</div>
+								<div class="result-side">
+									<div>分数 ${Math.round(item.score)}</div>
+									<div>使用 ${item.usageCount || 0}</div>
 								</div>
-								<div class="result-times">
-									<span>改：${escapeHtml(formatTime(item.updatedTime))}</span>
-									<span>建：${escapeHtml(formatTime(item.createdTime))}</span>
-									<span>看：${escapeHtml(formatTime(item.lastViewed))}</span>
-								</div>
-								<div class="snippet-list">${snippets}</div>
-							</article>
-						`;
-					}).join('')}
-				</div>
-			</section>
-		`;
-	}).join('');
-
-	return true;
+							</div>
+							<div class="result-times">
+								<span>改：${escapeHtml(formatTime(item.updatedTime))}</span>
+								<span>建：${escapeHtml(formatTime(item.createdTime))}</span>
+								<span>看：${escapeHtml(formatTime(item.lastViewed))}</span>
+							</div>
+							<div class="snippet-list">${snippets}</div>
+						</article>
+					`;
+				}).join('')}
+			</div>
+		</section>
+	`).join('');
 }
 
 function applyRequestToForm(request) {
-	const queryInput = $('queryInput');
-	const modeSelect = $('modeSelect');
-	const scopeSelect = $('scopeSelect');
-	const sortBySelect = $('sortBySelect');
-	const sortDirSelect = $('sortDirSelect');
-	const groupBySelect = $('groupBySelect');
-	const notebookInput = $('notebookInput');
-	const noteTypeSelect = $('noteTypeSelect');
-	const dateFieldSelect = $('dateFieldSelect');
-	const dateFromInput = $('dateFromInput');
-	const dateToInput = $('dateToInput');
-	const caseSensitiveInput = $('caseSensitiveInput');
-
-	if (!queryInput || !modeSelect || !scopeSelect || !sortBySelect || !sortDirSelect || !groupBySelect || !notebookInput || !noteTypeSelect || !dateFieldSelect || !dateFromInput || !dateToInput || !caseSensitiveInput) {
-		return false;
-	}
-
-	queryInput.value = request.query || '';
-	modeSelect.value = request.mode || 'smart';
-	scopeSelect.value = request.scope || 'all';
-	sortBySelect.value = request.sortBy || 'relevance';
-	sortDirSelect.value = request.sortDir || 'desc';
-	groupBySelect.value = request.groupBy || 'none';
-	notebookInput.value = request.notebookQuery || '';
-	noteTypeSelect.value = request.noteType || 'all';
-	dateFieldSelect.value = request.dateField || 'updated';
-	dateFromInput.value = request.dateFrom || '';
-	dateToInput.value = request.dateTo || '';
-	caseSensitiveInput.checked = !!request.caseSensitive;
-	return true;
+	if (!$('queryInput')) return;
+	$('queryInput').value = request.query || '';
+	$('modeSelect').value = request.mode || 'smart';
+	$('scopeSelect').value = request.scope || 'all';
+	$('sortBySelect').value = request.sortBy || 'relevance';
+	$('sortDirSelect').value = request.sortDir || 'desc';
+	$('groupBySelect').value = request.groupBy || 'none';
+	$('notebookInput').value = request.notebookQuery || '';
+	$('noteTypeSelect').value = request.noteType || 'all';
+	$('dateFieldSelect').value = request.dateField || 'updated';
+	$('dateFromInput').value = request.dateFrom || '';
+	$('dateToInput').value = request.dateTo || '';
+	$('caseSensitiveInput').checked = !!request.caseSensitive;
 }
 
 function updateRequestFromForm() {
@@ -375,12 +295,9 @@ function sendSearch(immediate) {
 			setStatusDetail('');
 			return;
 		}
-		void sendCommand(
-			{ type: 'search', payload: { ...state.request } },
-			'搜索',
-			'正在发起搜索...',
-			'等待插件主线程接手搜索请求',
-		);
+		setStatusText('正在发起搜索...');
+		setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
+		safePostMessage({ type: 'search', payload: { ...state.request } });
 	};
 	if (immediate) {
 		run();
@@ -389,131 +306,57 @@ function sendSearch(immediate) {
 	}
 }
 
-function bindEventsOnce() {
-	if (bindEventsOnce.done) return;
-	bindEventsOnce.done = true;
+document.addEventListener('input', event => {
+	const target = event.target;
+	if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
+	sendSearch(false);
+}, true);
 
-	document.addEventListener('input', event => {
-		const target = event.target;
-		if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
-		sendSearch(false);
-	}, true);
+document.addEventListener('change', event => {
+	const target = event.target;
+	if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
+	sendSearch(false);
+}, true);
 
-	document.addEventListener('change', event => {
-		const target = event.target;
-		if (!target || !target.id || !watchedFieldIds.has(target.id)) return;
-		sendSearch(false);
-	}, true);
+document.addEventListener('keydown', event => {
+	const target = event.target;
+	if (!target || target.id !== 'queryInput') return;
+	if (event.key !== 'Enter') return;
+	event.preventDefault();
+	sendSearch(true);
+}, true);
 
-	document.addEventListener('keydown', event => {
-		const target = event.target;
-		if (!target || target.id !== 'queryInput') return;
-		if (event.key !== 'Enter') return;
+document.addEventListener('click', event => {
+	const searchButton = safeClosest(event.target, '#searchBtn');
+	if (searchButton) {
 		event.preventDefault();
 		sendSearch(true);
-	}, true);
-
-	document.addEventListener('click', event => {
-		const searchButton = safeClosest(event.target, '#searchBtn');
-		if (searchButton) {
-			event.preventDefault();
-			sendSearch(true);
-			return;
-		}
-
-		const refreshButton = safeClosest(event.target, '#refreshIndexBtn');
-		if (refreshButton) {
-			event.preventDefault();
-			void sendCommand(
-				{ type: 'refreshIndex' },
-				'重建索引',
-				'正在请求重建索引...',
-				'等待插件主线程接手索引任务',
-			);
-			return;
-		}
-
-		const snippetButton = safeClosest(event.target, '.snippet-item');
-		if (!snippetButton) return;
-		safePostMessage({
-			type: 'openResult',
-			payload: {
-				noteId: snippetButton.dataset.noteId,
-				sectionSlug: snippetButton.dataset.sectionSlug || '',
-				line: Number(snippetButton.dataset.line || '0'),
-			},
-		});
-	}, true);
-}
-
-bindEventsOnce.done = false;
-
-function boot(attempt) {
-	if (booted) return;
-	if (!hasCoreDom()) {
-		if (attempt < 60) setTimeout(() => boot(attempt + 1), 100);
 		return;
 	}
 
-	booted = true;
-	bindEventsOnce();
-	renderRuntimeCards();
-	renderResults();
-	renderHeaderStatus();
-	startReadyPings();
-	void sendCommand(
-		{ type: 'ready' },
-		'初始化握手',
-		'正在连接插件主线程...',
-		'等待主线程返回初始化状态',
-	);
-}
-
-webviewApi.onMessage(message => {
-	if (!message) return;
-	clearBridgeTimeout();
-
-	if (message.type === 'ack') {
-		readyAcked = true;
+	const refreshButton = safeClosest(event.target, '#refreshIndexBtn');
+	if (refreshButton) {
+		event.preventDefault();
+		setStatusText('正在请求重建索引...');
+		setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
+		safePostMessage({ type: 'refreshIndex' });
 		return;
 	}
 
-	if (message.type === 'init') {
-		readyAcked = true;
-		stopReadyPings();
-		state.request = { ...state.request, ...((message.payload && message.payload.request) || {}) };
-		state.runtimes = { ...state.runtimes, ...((message.payload && message.payload.runtimes) || {}) };
-		if (!applyRequestToForm(state.request)) {
-			setTimeout(() => applyRequestToForm(state.request), 100);
-		}
-		renderRuntimeCards();
-		renderHeaderStatus();
-		return;
-	}
+	const snippetButton = safeClosest(event.target, '.snippet-item');
+	if (!snippetButton) return;
+	safePostMessage({
+		type: 'openResult',
+		payload: {
+			noteId: snippetButton.dataset.noteId,
+			sectionSlug: snippetButton.dataset.sectionSlug || '',
+			line: Number(snippetButton.dataset.line || '0'),
+		},
+	});
+}, true);
 
-	if (message.type === 'runtime') {
-		readyAcked = true;
-		if (message.payload && message.payload.kind) {
-			state.runtimes[message.payload.kind] = message.payload;
-			renderRuntimeCards();
-			renderHeaderStatus();
-		}
-		return;
-	}
-
-	if (message.type === 'status') {
-		readyAcked = true;
-		setStatusText(message.text || '准备就绪');
-		return;
-	}
-
-	if (message.type === 'results') {
-		readyAcked = true;
-		state.response = message.payload || null;
-		if (!renderResults()) {
-			setTimeout(renderResults, 100);
-		}
-	}
-});
-
-boot(0);
+applyRequestToForm(state.request || {});
+renderRuntimeCards();
+renderResults();
+renderHeaderStatus();
+safePostMessage({ type: 'ready' });

@@ -111,6 +111,7 @@ let saveStatsTimer: NodeJS.Timeout | null = null;
 let lastSelectedNoteId = '';
 let backgroundReindexTimer: NodeJS.Timeout | null = null;
 let searchRunId = 0;
+let lastSearchResponse: any = null;
 
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
@@ -137,7 +138,21 @@ function escapeHtml(text: string): string {
 		.replace(/'/g, '&#039;');
 }
 
+function escapeScriptJson(data: any): string {
+	return JSON.stringify(data)
+		.replace(/</g, '\\u003c')
+		.replace(/>/g, '\\u003e')
+		.replace(/&/g, '\\u0026')
+		.replace(/\u2028/g, '\\u2028')
+		.replace(/\u2029/g, '\\u2029');
+}
+
 function createPanelHtml(): string {
+	const payload = escapeScriptJson({
+		request: lastSearchRequest,
+		response: lastSearchResponse,
+		runtimes: latestTaskStates,
+	});
 	return `
 		<div class="sw-root">
 			<div class="sw-header">
@@ -220,6 +235,7 @@ function createPanelHtml(): string {
 			<div id="runtimeRoot" class="sw-runtime-root"></div>
 			<div id="resultsRoot" class="sw-results"></div>
 		</div>
+		<script id="initialState" type="application/json">${payload}</script>
 	`;
 }
 
@@ -227,13 +243,9 @@ async function showToast(message: string) {
 	await joplin.views.dialogs.showToast({ message, type: ToastType.Info });
 }
 
-async function postPanelMessage(message: any) {
+async function refreshPanel() {
 	if (!panelHandle) return;
-	try {
-		joplin.views.panels.postMessage(panelHandle, message);
-	} catch (_error) {
-		// Ignore.
-	}
+	await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 }
 
 async function emitRuntime(progress: any) {
@@ -242,7 +254,7 @@ async function emitRuntime(progress: any) {
 		...latestTaskStates,
 		[progress.kind]: progress,
 	};
-	await postPanelMessage({ type: 'runtime', payload: progress });
+	await refreshPanel();
 }
 
 function buildFolderPaths(folders: Array<{ id: string; title: string; parent_id?: string }>): CachedFolder[] {
@@ -567,15 +579,13 @@ async function runSearch(request: SearchRequest) {
 			processed: 0,
 			total: 0,
 		}));
-		await postPanelMessage({
-			type: 'results',
-			payload: {
-				request,
-				statusText: message,
-				resultCount: 0,
-				groups: [],
-			},
-		});
+		lastSearchResponse = {
+			request,
+			statusText: message,
+			resultCount: 0,
+			groups: [],
+		};
+		await refreshPanel();
 		return;
 	}
 
@@ -590,7 +600,7 @@ async function runSearch(request: SearchRequest) {
 	});
 
 	if (currentRunId !== searchRunId || outcome?.cancelled) return;
-	await postPanelMessage({ type: 'results', payload: outcome.response });
+	lastSearchResponse = outcome.response;
 	await emitRuntime(outcome.progress);
 }
 
@@ -620,22 +630,13 @@ joplin.plugins.register({
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			try {
 				if (message?.type === 'ready') {
-					await postPanelMessage({ type: 'ack', action: 'ready' });
-					await postPanelMessage({ type: 'init', payload: { request: lastSearchRequest, runtimes: latestTaskStates } });
-					try {
-						await ensureIndexReady();
-					} catch (_error) {
-						// 错误已通过 runtime 状态显示。
-					}
-					return { ok: true, action: 'ready' };
+					return;
 				}
 				if (message?.type === 'search') {
-					await postPanelMessage({ type: 'ack', action: 'search' });
 					void runSearch({ ...lastSearchRequest, ...message.payload });
-					return { ok: true, action: 'search-started' };
+					return;
 				}
 				if (message?.type === 'refreshIndex') {
-					await postPanelMessage({ type: 'ack', action: 'refreshIndex' });
 					cacheDirty = true;
 					void (async () => {
 						try {
@@ -645,14 +646,11 @@ joplin.plugins.register({
 							// 错误已通过 runtime 状态显示。
 						}
 					})();
-					return { ok: true, action: 'refresh-started' };
+					return;
 				}
 				if (message?.type === 'openResult') {
-					await postPanelMessage({ type: 'ack', action: 'openResult' });
 					void openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
-					return { ok: true, action: 'open-started' };
 				}
-				return { ok: false, action: 'unknown-message', type: message?.type || 'unknown' };
 			} catch (error) {
 				await emitRuntime(makeTaskProgress({
 					kind: 'index',
@@ -664,7 +662,6 @@ joplin.plugins.register({
 					total: 0,
 					errors: [{ stage: 'panel-message', item: message?.type || 'unknown', message: toErrorMessage(error) }],
 				}));
-				return { ok: false, action: 'error', type: message?.type || 'unknown', error: toErrorMessage(error) };
 			}
 		});
 
