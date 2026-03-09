@@ -2,6 +2,12 @@
 	color-scheme: light dark;
 }
 
+html,
+body {
+	height: 100%;
+	overflow: hidden;
+}
+
 body {
 	margin: 0;
 	padding: 0;
@@ -12,7 +18,13 @@ body {
 }
 
 .sw-root {
+	height: 100vh;
+	box-sizing: border-box;
 	padding: 10px;
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow: hidden;
 }
 
 .sw-header {
@@ -35,6 +47,7 @@ body {
 }
 
 .sw-form {
+	flex: 0 0 auto;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -90,6 +103,7 @@ body {
 }
 
 .sw-status {
+	flex: 0 0 auto;
 	display: flex;
 	justify-content: space-between;
 	gap: 10px;
@@ -119,10 +133,12 @@ body {
 }
 
 .sw-runtime-root {
+	flex: 0 0 auto;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
 	margin-bottom: 12px;
+	min-height: 0;
 }
 
 .runtime-card {
@@ -244,6 +260,14 @@ body {
 	font-style: normal;
 	opacity: .85;
 	flex: 1 1 100%;
+}
+
+.sw-results {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	padding-bottom: 10px;
 }
 
 .empty {
