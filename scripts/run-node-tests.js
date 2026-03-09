@@ -1,8 +1,14 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
+const fs = require('node:fs');
+
 const projectRoot = path.resolve(__dirname, '..');
-const args = ['--test', path.join('test', 'search-core.test.js')];
+const testDir = path.join(projectRoot, 'test');
+const testFiles = fs.readdirSync(testDir)
+	.filter(name => name.endsWith('.test.js'))
+	.map(name => path.join('test', name));
+const args = ['--test', ...testFiles];
 
 const result = spawnSync(process.execPath, args, {
 	cwd: projectRoot,

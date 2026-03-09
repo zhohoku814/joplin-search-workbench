@@ -14,13 +14,13 @@ const {
 	normaliseNewlines,
 	searchNotesWithProgress,
 } = require('./searchCore');
+const { cloneRequest } = require('./panelClientState');
 
 const PANEL_ID = 'searchWorkbench.panel';
 const SETTINGS_SECTION = 'searchWorkbench';
 const SETTINGS_STATS = 'searchWorkbench.noteStats';
 const PAGE_SIZE = 100;
 const MAX_RESULTS = 200;
-
 
 type SearchMode = 'smart' | 'literal' | 'regex';
 type SearchScope = 'all' | 'title' | 'body';
@@ -29,6 +29,8 @@ type SortDir = 'desc' | 'asc';
 type GroupBy = 'none' | 'folder' | 'updatedMonth' | 'noteType';
 type DateField = 'updated' | 'created' | 'lastViewed';
 type NoteTypeFilter = 'all' | 'note' | 'todo';
+
+type RuntimeKind = 'index' | 'search';
 
 interface NoteStats {
 	usageCount: number;
@@ -85,33 +87,57 @@ interface RuntimeErrorEntry {
 	message: string;
 }
 
+interface PanelMeta {
+	indexDirty: boolean;
+	lastAction: string;
+	revision: number;
+}
+
+interface PanelModel {
+	request: SearchRequest;
+	response: any;
+	runtimes: Record<RuntimeKind, any>;
+	meta: PanelMeta;
+}
+
+interface PanelModelPatch {
+	request?: SearchRequest;
+	response?: any;
+	runtimes?: Partial<Record<RuntimeKind, any>>;
+	meta?: Partial<PanelMeta>;
+}
+
 let panelHandle: any = null;
+let panelReady = false;
 let cachedFolders: CachedFolder[] = [];
 let cachedNotes: CachedNote[] = [];
 let cacheDirty = true;
-let isIndexing = false;
 let currentIndexPromise: Promise<void> | null = null;
-let latestTaskStates: Record<string, any> = { index: null, search: null };
-let lastSearchRequest: SearchRequest = {
-	query: '',
-	mode: 'smart',
-	scope: 'all',
-	caseSensitive: false,
-	noteType: 'all',
-	notebookQuery: '',
-	dateField: 'updated',
-	dateFrom: '',
-	dateTo: '',
-	sortBy: 'relevance',
-	sortDir: 'desc',
-	groupBy: 'none',
-};
 let noteStats: Record<string, NoteStats> = {};
 let saveStatsTimer: NodeJS.Timeout | null = null;
 let lastSelectedNoteId = '';
-let backgroundReindexTimer: NodeJS.Timeout | null = null;
 let searchRunId = 0;
-let lastSearchResponse: any = null;
+let panelModel: PanelModel = createPanelModel();
+
+function createDefaultRequest(): SearchRequest {
+	return cloneRequest({}) as SearchRequest;
+}
+
+function createPanelModel(): PanelModel {
+	return {
+		request: createDefaultRequest(),
+		response: null,
+		runtimes: {
+			index: null,
+			search: null,
+		},
+		meta: {
+			indexDirty: true,
+			lastAction: '初始化',
+			revision: 0,
+		},
+	};
+}
 
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
@@ -147,12 +173,23 @@ function escapeScriptJson(data: any): string {
 		.replace(/\u2029/g, '\\u2029');
 }
 
+function serialisePanelModel() {
+	return {
+		request: createDefaultRequest() ? cloneRequest(panelModel.request) : panelModel.request,
+		response: panelModel.response,
+		runtimes: {
+			index: panelModel.runtimes.index,
+			search: panelModel.runtimes.search,
+		},
+		meta: {
+			...panelModel.meta,
+			indexDirty: cacheDirty,
+		},
+	};
+}
+
 function createPanelHtml(): string {
-	const payload = escapeScriptJson({
-		request: lastSearchRequest,
-		response: lastSearchResponse,
-		runtimes: latestTaskStates,
-	});
+	const payload = escapeScriptJson(serialisePanelModel());
 	return `
 		<div class="sw-root">
 			<div class="sw-header">
@@ -243,18 +280,69 @@ async function showToast(message: string) {
 	await joplin.views.dialogs.showToast({ message, type: ToastType.Info });
 }
 
-async function refreshPanel() {
+async function renderPanelShell() {
 	if (!panelHandle) return;
+	panelReady = false;
 	await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
 }
 
-async function emitRuntime(progress: any) {
-	if (!progress?.kind) return;
-	latestTaskStates = {
-		...latestTaskStates,
-		[progress.kind]: progress,
+function pushPanelState(options: { syncForm?: boolean } = {}) {
+	if (!panelHandle || !panelReady) return;
+	try {
+		joplin.views.panels.postMessage(panelHandle, {
+			name: 'state',
+			syncForm: !!options.syncForm,
+			payload: serialisePanelModel(),
+		});
+	} catch (_error) {
+		void renderPanelShell();
+	}
+}
+
+function updatePanelModel(patch: PanelModelPatch, options: { syncForm?: boolean; push?: boolean } = {}) {
+	panelModel = {
+		...panelModel,
+		...patch,
+		request: patch.request ? (cloneRequest(patch.request) as SearchRequest) : panelModel.request,
+		runtimes: patch.runtimes ? { ...panelModel.runtimes, ...patch.runtimes } : panelModel.runtimes,
+		meta: {
+			...panelModel.meta,
+			...(patch.meta || {}),
+			revision: panelModel.meta.revision + 1,
+		},
 	};
-	await refreshPanel();
+	if (options.push !== false) pushPanelState({ syncForm: options.syncForm });
+}
+
+function setRuntime(kind: RuntimeKind, runtime: any) {
+	updatePanelModel({
+		runtimes: { [kind]: runtime } as Record<RuntimeKind, any>,
+		meta: { lastAction: runtime?.statusText || panelModel.meta.lastAction },
+	});
+}
+
+function buildStaleIndexRuntime(reason: string) {
+	const knownCount = cachedNotes.length;
+	return makeTaskProgress({
+		kind: 'index',
+		phase: 'stale',
+		state: 'warning',
+		statusText: '索引待更新',
+		detail: `检测到${reason}，下一次搜索或手动重建时会刷新索引。`,
+		processed: knownCount,
+		total: knownCount || 0,
+	});
+}
+
+function markIndexDirty(reason = '内容变化') {
+	cacheDirty = true;
+	updatePanelModel({
+		runtimes: { index: buildStaleIndexRuntime(reason) } as Record<RuntimeKind, any>,
+		meta: {
+			indexDirty: true,
+			lastAction: `索引标记为过期：${reason}`,
+		},
+	});
 }
 
 function buildFolderPaths(folders: Array<{ id: string; title: string; parent_id?: string }>): CachedFolder[] {
@@ -318,7 +406,7 @@ async function countAllNotes(reason: string, errors: RuntimeErrorEntry[]): Promi
 		const items = Array.isArray(response) ? response : (response?.items || []);
 		total += items.length;
 		const lastItem = items.length ? items[items.length - 1] : null;
-		await emitRuntime(makeTaskProgress({
+		setRuntime('index', makeTaskProgress({
 			kind: 'index',
 			phase: 'count',
 			state: 'running',
@@ -366,11 +454,11 @@ async function rebuildIndex(reason = '手动刷新') {
 	const previousFolders = cachedFolders;
 	const previousNotes = cachedNotes;
 	currentIndexPromise = (async () => {
-		isIndexing = true;
 		const errors: RuntimeErrorEntry[] = [];
 
 		try {
-			await emitRuntime(makeTaskProgress({
+			updatePanelModel({ meta: { indexDirty: true, lastAction: `开始重建索引：${reason}` } });
+			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'start',
 				state: 'running',
@@ -382,7 +470,7 @@ async function rebuildIndex(reason = '手动刷新') {
 			}));
 
 			const totalNotes = await countAllNotes(reason, errors);
-			await emitRuntime(makeTaskProgress({
+			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'folders',
 				state: 'running',
@@ -438,7 +526,7 @@ async function rebuildIndex(reason = '手动刷新') {
 
 					processed += 1;
 					if (processed === 1 || processed % 10 === 0 || processed === totalNotes) {
-						await emitRuntime(makeTaskProgress({
+						setRuntime('index', makeTaskProgress({
 							kind: 'index',
 							phase: 'notes',
 							state: 'running',
@@ -459,7 +547,8 @@ async function rebuildIndex(reason = '手动刷新') {
 			cachedFolders = builtFolders;
 			cachedNotes = builtNotes;
 			cacheDirty = false;
-			await emitRuntime(makeTaskProgress({
+			updatePanelModel({ meta: { indexDirty: false, lastAction: `索引完成：${reason}` } });
+			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'done',
 				state: errors.length ? 'warning' : 'done',
@@ -474,7 +563,8 @@ async function rebuildIndex(reason = '手动刷新') {
 			cachedNotes = previousNotes;
 			cacheDirty = true;
 			pushRuntimeError(errors, 'index', reason, error);
-			await emitRuntime(makeTaskProgress({
+			updatePanelModel({ meta: { indexDirty: true, lastAction: `索引失败：${reason}` } });
+			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'error',
 				state: 'error',
@@ -486,7 +576,6 @@ async function rebuildIndex(reason = '手动刷新') {
 			}));
 			throw error;
 		} finally {
-			isIndexing = false;
 			currentIndexPromise = null;
 		}
 	})();
@@ -494,22 +583,14 @@ async function rebuildIndex(reason = '手动刷新') {
 	return currentIndexPromise;
 }
 
-function markIndexDirty(_reason = '内容变化') {
-	cacheDirty = true;
-	if (backgroundReindexTimer) {
-		clearTimeout(backgroundReindexTimer);
-		backgroundReindexTimer = null;
-	}
-}
-
-async function ensureIndexReady() {
+async function ensureIndexReady(reason = '搜索请求') {
 	if (currentIndexPromise) {
 		await currentIndexPromise;
 		return;
 	}
 	if (cacheDirty || !cachedNotes.length) {
-		const reason = cachedNotes.length ? '自动更新' : '首次建立';
-		await rebuildIndex(reason);
+		const rebuildReason = cachedNotes.length ? `自动更新（${reason}）` : '首次建立';
+		await rebuildIndex(rebuildReason);
 	}
 }
 
@@ -544,13 +625,17 @@ async function openResult(noteId: string, sectionSlug: string, line: number) {
 	await showToast(line > 0 ? `已打开，命中在第 ${line} 行附近` : '已打开目标笔记');
 }
 
-async function runSearch(request: SearchRequest) {
-	lastSearchRequest = request;
+async function runSearch(requestInput: SearchRequest) {
+	const request = cloneRequest(requestInput) as SearchRequest;
 	const currentRunId = ++searchRunId;
+	updatePanelModel({
+		request,
+		meta: { lastAction: `收到搜索请求：${request.query || '(空)'}` },
+	});
 
 	try {
 		if (currentIndexPromise) {
-			await emitRuntime(makeTaskProgress({
+			setRuntime('search', makeTaskProgress({
 				kind: 'search',
 				phase: 'wait-index',
 				state: 'running',
@@ -560,11 +645,11 @@ async function runSearch(request: SearchRequest) {
 				total: 0,
 			}));
 		}
-		await ensureIndexReady();
+		await ensureIndexReady('搜索请求');
 	} catch (error) {
 		if (currentRunId !== searchRunId) return;
 		const message = `搜索前索引失败：${toErrorMessage(error)}`;
-		await emitRuntime(makeTaskProgress({
+		setRuntime('search', makeTaskProgress({
 			kind: 'search',
 			phase: 'error',
 			state: 'error',
@@ -573,13 +658,15 @@ async function runSearch(request: SearchRequest) {
 			processed: 0,
 			total: 0,
 		}));
-		lastSearchResponse = {
-			request,
-			statusText: message,
-			resultCount: 0,
-			groups: [],
-		};
-		await refreshPanel();
+		updatePanelModel({
+			response: {
+				request,
+				statusText: message,
+				resultCount: 0,
+				groups: [],
+			},
+			meta: { lastAction: '搜索失败' },
+		});
 		return;
 	}
 
@@ -589,13 +676,27 @@ async function runSearch(request: SearchRequest) {
 		shouldCancel: () => currentRunId !== searchRunId,
 		onProgress: async (progress: any) => {
 			if (currentRunId !== searchRunId) return;
-			await emitRuntime(progress);
+			setRuntime('search', progress);
 		},
 	});
 
 	if (currentRunId !== searchRunId || outcome?.cancelled) return;
-	lastSearchResponse = outcome.response;
-	await emitRuntime(outcome.progress);
+	updatePanelModel({
+		response: outcome.response,
+		meta: { lastAction: '搜索完成' },
+	});
+	setRuntime('search', outcome.progress);
+}
+
+async function refreshIndexFromUser(reason: string) {
+	cacheDirty = true;
+	updatePanelModel({ meta: { indexDirty: true, lastAction: `收到重建索引请求：${reason}` } });
+	try {
+		await rebuildIndex(reason);
+		if (panelModel.request.query.trim()) await runSearch(panelModel.request);
+	} catch (_error) {
+		// 错误已通过 runtime 状态显示。
+	}
 }
 
 joplin.plugins.register({
@@ -618,35 +719,34 @@ joplin.plugins.register({
 		});
 
 		await loadStats();
-
 		panelHandle = await joplin.views.panels.create(PANEL_ID);
+		await renderPanelShell();
+		await joplin.views.panels.addScript(panelHandle, './webview.css');
+		await joplin.views.panels.addScript(panelHandle, './panelClientState.js');
+		await joplin.views.panels.addScript(panelHandle, './webview.js');
 
 		await joplin.views.panels.onMessage(panelHandle, async (message: any) => {
 			try {
-				if (message?.type === 'ready') {
-					return;
+				if (message?.name === 'ready') {
+					panelReady = true;
+					pushPanelState({ syncForm: true });
+					return { accepted: true };
 				}
-				if (message?.type === 'search') {
-					void runSearch({ ...lastSearchRequest, ...message.payload });
-					return;
+				if (message?.name === 'search') {
+					void runSearch(message.payload || createDefaultRequest());
+					return { accepted: true };
 				}
-				if (message?.type === 'refreshIndex') {
-					cacheDirty = true;
-					void (async () => {
-						try {
-							await rebuildIndex('手动刷新');
-							if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
-						} catch (_error) {
-							// 错误已通过 runtime 状态显示。
-						}
-					})();
-					return;
+				if (message?.name === 'refreshIndex') {
+					void refreshIndexFromUser('手动刷新');
+					return { accepted: true };
 				}
-				if (message?.type === 'openResult') {
+				if (message?.name === 'openResult') {
 					void openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
+					return { accepted: true };
 				}
+				return { accepted: false, message: '未知命令' };
 			} catch (error) {
-				await emitRuntime(makeTaskProgress({
+				setRuntime('index', makeTaskProgress({
 					kind: 'index',
 					phase: 'panel-message-error',
 					state: 'error',
@@ -654,14 +754,11 @@ joplin.plugins.register({
 					detail: toErrorMessage(error),
 					processed: 0,
 					total: 0,
-					errors: [{ stage: 'panel-message', item: message?.type || 'unknown', message: toErrorMessage(error) }],
+					errors: [{ stage: 'panel-message', item: message?.name || 'unknown', message: toErrorMessage(error) }],
 				}));
+				return { accepted: false, message: toErrorMessage(error) };
 			}
 		});
-
-		await joplin.views.panels.setHtml(panelHandle, createPanelHtml());
-		await joplin.views.panels.addScript(panelHandle, './webview.css');
-		await joplin.views.panels.addScript(panelHandle, './webview.js');
 
 		await joplin.commands.register({
 			name: 'searchWorkbench.togglePanel',
@@ -678,13 +775,7 @@ joplin.plugins.register({
 			label: '重建 Search Workbench 索引',
 			iconName: 'fas fa-rotate',
 			execute: async () => {
-				cacheDirty = true;
-				try {
-					await rebuildIndex('命令触发');
-					if (lastSearchRequest.query.trim()) await runSearch(lastSearchRequest);
-				} catch (_error) {
-					// 错误已通过 runtime 状态显示。
-				}
+				await refreshIndexFromUser('命令触发');
 			},
 		});
 

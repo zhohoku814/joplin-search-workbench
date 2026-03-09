@@ -2,11 +2,43 @@ function $(id) {
 	return document.getElementById(id);
 }
 
-function readInitialState() {
-	const node = $('initialState');
-	if (!node) {
-		return {
-			request: {
+function protocol() {
+	if (typeof SearchWorkbenchPanelState !== 'undefined' && SearchWorkbenchPanelState) {
+		return SearchWorkbenchPanelState;
+	}
+	return {
+		createDefaultRequest: () => ({
+			query: '',
+			mode: 'smart',
+			scope: 'all',
+			caseSensitive: false,
+			noteType: 'all',
+			notebookQuery: '',
+			dateField: 'updated',
+			dateFrom: '',
+			dateTo: '',
+			sortBy: 'relevance',
+			sortDir: 'desc',
+			groupBy: 'none',
+		}),
+		cloneRequest: input => ({
+			query: '',
+			mode: 'smart',
+			scope: 'all',
+			caseSensitive: false,
+			noteType: 'all',
+			notebookQuery: '',
+			dateField: 'updated',
+			dateFrom: '',
+			dateTo: '',
+			sortBy: 'relevance',
+			sortDir: 'desc',
+			groupBy: 'none',
+			...(input || {}),
+		}),
+		createClientState: initial => ({
+			server: initial || { request: {}, response: null, runtimes: { index: null, search: null }, meta: {} },
+			draftRequest: {
 				query: '',
 				mode: 'smart',
 				scope: 'all',
@@ -19,9 +51,36 @@ function readInitialState() {
 				sortBy: 'relevance',
 				sortDir: 'desc',
 				groupBy: 'none',
+				...((initial && initial.request) || {}),
 			},
+		}),
+		receiveServerState: (state, message) => {
+			if (!message || message.name !== 'state') return state;
+			const next = {
+				...state,
+				server: message.payload || { request: {}, response: null, runtimes: { index: null, search: null }, meta: {} },
+			};
+			if (message.syncForm) next.draftRequest = { ...next.draftRequest, ...((message.payload && message.payload.request) || {}) };
+			return next;
+		},
+		updateDraftRequest: (state, patch) => ({
+			...state,
+			draftRequest: {
+				...state.draftRequest,
+				...(patch || {}),
+			},
+		}),
+		};
+}
+
+function readInitialState() {
+	const node = $('initialState');
+	if (!node) {
+		return {
+			request: protocol().createDefaultRequest(),
 			response: null,
 			runtimes: { index: null, search: null },
+			meta: {},
 		};
 	}
 
@@ -29,27 +88,15 @@ function readInitialState() {
 		return JSON.parse(node.textContent || '{}');
 	} catch (_error) {
 		return {
-			request: {
-				query: '',
-				mode: 'smart',
-				scope: 'all',
-				caseSensitive: false,
-				noteType: 'all',
-				notebookQuery: '',
-				dateField: 'updated',
-				dateFrom: '',
-				dateTo: '',
-				sortBy: 'relevance',
-				sortDir: 'desc',
-				groupBy: 'none',
-			},
+			request: protocol().createDefaultRequest(),
 			response: null,
 			runtimes: { index: null, search: null },
+			meta: {},
 		};
 	}
 }
 
-const state = readInitialState();
+let state = protocol().createClientState(readInitialState());
 
 function setStatusText(text) {
 	const node = $('statusText');
@@ -71,12 +118,13 @@ function safeClosest(target, selector) {
 	return target.closest(selector);
 }
 
-function safePostMessage(message) {
+async function postCommand(message) {
 	try {
-		webviewApi.postMessage(message);
+		return await webviewApi.postMessage(message);
 	} catch (_error) {
 		setStatusText('消息发送失败');
 		setStatusDetail('webviewApi.postMessage 调用失败');
+		return null;
 	}
 }
 
@@ -119,26 +167,28 @@ function runtimePriority(runtime) {
 }
 
 function getPrimaryRuntime() {
-	const candidates = [state.runtimes.search, state.runtimes.index].filter(Boolean);
+	const runtimes = state.server && state.server.runtimes ? state.server.runtimes : { index: null, search: null };
+	const candidates = [runtimes.search, runtimes.index].filter(Boolean);
 	candidates.sort((a, b) => runtimePriority(b) - runtimePriority(a));
 	return candidates[0] || null;
 }
 
 function renderHeaderStatus() {
 	const primary = getPrimaryRuntime();
+	const response = state.server ? state.server.response : null;
 	if (primary) {
 		setStatusText(primary.statusText || '准备就绪');
 		setStatusDetail(primary.detail || '');
-	} else if (state.response && state.response.statusText) {
-		setStatusText(state.response.statusText);
+	} else if (response && response.statusText) {
+		setStatusText(response.statusText);
 		setStatusDetail('');
 	} else {
 		setStatusText('准备就绪');
 		setStatusDetail('');
 	}
 
-	if (state.response) {
-		setMetaText(`分组 ${state.response.groups.length} · 结果 ${state.response.resultCount}`);
+	if (response) {
+		setMetaText(`分组 ${response.groups.length} · 结果 ${response.resultCount}`);
 	} else {
 		setMetaText('');
 	}
@@ -148,9 +198,10 @@ function renderRuntimeCards() {
 	const root = $('runtimeRoot');
 	if (!root) return;
 
+	const runtimes = state.server && state.server.runtimes ? state.server.runtimes : { index: null, search: null };
 	const order = ['index', 'search'];
 	const cards = order
-		.map(kind => state.runtimes[kind])
+		.map(kind => runtimes[kind])
 		.filter(Boolean)
 		.map(runtime => {
 			const percentText = runtime.percent == null ? '—' : `${runtime.percent}%`;
@@ -183,7 +234,7 @@ function renderResults() {
 	const root = $('resultsRoot');
 	if (!root) return;
 
-	const response = state.response;
+	const response = state.server ? state.server.response : null;
 	if (!response) {
 		root.innerHTML = '<div class="empty">还没有结果。</div>';
 		renderHeaderStatus();
@@ -237,7 +288,8 @@ function renderResults() {
 	`).join('');
 }
 
-function applyRequestToForm(request) {
+function applyDraftToForm() {
+	const request = state.draftRequest || protocol().createDefaultRequest();
 	if (!$('queryInput')) return;
 	$('queryInput').value = request.query || '';
 	$('modeSelect').value = request.mode || 'smart';
@@ -253,8 +305,8 @@ function applyRequestToForm(request) {
 	$('caseSensitiveInput').checked = !!request.caseSensitive;
 }
 
-function updateRequestFromForm() {
-	state.request = {
+function updateDraftFromForm() {
+	state = protocol().updateDraftRequest(state, {
 		query: $('queryInput') ? $('queryInput').value : '',
 		mode: $('modeSelect') ? $('modeSelect').value : 'smart',
 		scope: $('scopeSelect') ? $('scopeSelect').value : 'all',
@@ -267,19 +319,50 @@ function updateRequestFromForm() {
 		sortBy: $('sortBySelect') ? $('sortBySelect').value : 'relevance',
 		sortDir: $('sortDirSelect') ? $('sortDirSelect').value : 'desc',
 		groupBy: $('groupBySelect') ? $('groupBySelect').value : 'none',
-	};
+	});
 }
 
-function sendSearch() {
-	updateRequestFromForm();
-	if (!state.request.query.trim()) {
+function renderAll() {
+	renderRuntimeCards();
+	renderResults();
+	renderHeaderStatus();
+}
+
+async function sendSearch() {
+	updateDraftFromForm();
+	if (!state.draftRequest.query.trim()) {
 		setStatusText('请输入搜索词。');
 		setStatusDetail('');
 		return;
 	}
 	setStatusText('正在发起搜索...');
-	setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
-	safePostMessage({ type: 'search', payload: { ...state.request } });
+	setStatusDetail('请求已经发给插件主线程，等待结果返回');
+	const response = await postCommand({ name: 'search', payload: { ...state.draftRequest } });
+	if (response && response.accepted === false) {
+		setStatusText('搜索请求未被接受');
+		setStatusDetail(response.message || '插件主线程拒绝了请求');
+	}
+}
+
+async function sendRefreshIndex() {
+	setStatusText('正在请求重建索引...');
+	setStatusDetail('请求已经发给插件主线程，等待状态更新');
+	const response = await postCommand({ name: 'refreshIndex' });
+	if (response && response.accepted === false) {
+		setStatusText('重建索引请求未被接受');
+		setStatusDetail(response.message || '插件主线程拒绝了请求');
+	}
+}
+
+function bindPanelMessages() {
+	if (typeof webviewApi === 'undefined' || !webviewApi || typeof webviewApi.onMessage !== 'function') return;
+	webviewApi.onMessage(message => {
+		state = protocol().receiveServerState(state, message);
+		if (message && message.name === 'state' && message.syncForm) {
+			applyDraftToForm();
+		}
+		renderAll();
+	});
 }
 
 document.addEventListener('keydown', event => {
@@ -287,30 +370,28 @@ document.addEventListener('keydown', event => {
 	if (!target || target.id !== 'queryInput') return;
 	if (event.key !== 'Enter') return;
 	event.preventDefault();
-	sendSearch();
+	void sendSearch();
 }, true);
 
 document.addEventListener('click', event => {
 	const searchButton = safeClosest(event.target, '#searchBtn');
 	if (searchButton) {
 		event.preventDefault();
-		sendSearch();
+		void sendSearch();
 		return;
 	}
 
 	const refreshButton = safeClosest(event.target, '#refreshIndexBtn');
 	if (refreshButton) {
 		event.preventDefault();
-		setStatusText('正在请求重建索引...');
-		setStatusDetail('如果插件主线程正常工作，面板会很快被刷新');
-		safePostMessage({ type: 'refreshIndex' });
+		void sendRefreshIndex();
 		return;
 	}
 
 	const snippetButton = safeClosest(event.target, '.snippet-item');
 	if (!snippetButton) return;
-	safePostMessage({
-		type: 'openResult',
+	void postCommand({
+		name: 'openResult',
 		payload: {
 			noteId: snippetButton.dataset.noteId,
 			sectionSlug: snippetButton.dataset.sectionSlug || '',
@@ -319,8 +400,33 @@ document.addEventListener('click', event => {
 	});
 }, true);
 
-applyRequestToForm(state.request || {});
-renderRuntimeCards();
-renderResults();
-renderHeaderStatus();
-safePostMessage({ type: 'ready' });
+document.addEventListener('change', event => {
+	const target = event.target;
+	if (!target || !target.id) return;
+	if (![
+		'modeSelect',
+		'scopeSelect',
+		'sortBySelect',
+		'sortDirSelect',
+		'groupBySelect',
+		'notebookInput',
+		'noteTypeSelect',
+		'dateFieldSelect',
+		'dateFromInput',
+		'dateToInput',
+		'caseSensitiveInput',
+	].includes(target.id)) return;
+	updateDraftFromForm();
+}, true);
+
+document.addEventListener('input', event => {
+	const target = event.target;
+	if (!target || !target.id) return;
+	if (!['queryInput', 'notebookInput', 'dateFromInput', 'dateToInput'].includes(target.id)) return;
+	updateDraftFromForm();
+}, true);
+
+bindPanelMessages();
+applyDraftToForm();
+renderAll();
+void postCommand({ name: 'ready' });

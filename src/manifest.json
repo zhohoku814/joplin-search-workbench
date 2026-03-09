@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "com.openclaw.searchWorkbench",
   "app_min_version": "2.8",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "name": "Search Workbench",
   "description": "VS Code 风格的 Joplin 搜索工作台：全文片段、高亮、分组、排序、正则、时间过滤。",
   "author": "OpenClaw",
