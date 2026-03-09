@@ -176,7 +176,7 @@ function escapeScriptJson(data: any): string {
 
 function serialisePanelModel() {
 	return {
-		request: createDefaultRequest() ? cloneRequest(panelModel.request) : panelModel.request,
+		request: cloneRequest(panelModel.request),
 		response: panelModel.response,
 		runtimes: {
 			index: panelModel.runtimes.index,
@@ -189,7 +189,145 @@ function serialisePanelModel() {
 	};
 }
 
+function selected(value: string, expected: string): string {
+	return value === expected ? ' selected' : '';
+}
+
+function checked(value: boolean): string {
+	return value ? ' checked' : '';
+}
+
+function escapeAttribute(text: string): string {
+	return escapeHtml(text).replace(/`/g, '&#096;');
+}
+
+function formatTime(ts: number): string {
+	if (!ts) return '—';
+	return new Date(ts).toLocaleString();
+}
+
+function highlightText(text: string, highlights: string[] = []): string {
+	let html = escapeHtml(text || '');
+	const unique = Array.from(new Set((highlights || []).filter(Boolean)))
+		.sort((a, b) => b.length - a.length)
+		.slice(0, 12);
+	for (const item of unique) {
+		const escaped = escapeHtml(item).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		html = html.replace(new RegExp(escaped, 'gi'), match => `<mark>${match}</mark>`);
+	}
+	return html;
+}
+
+function runtimePriority(runtime: any): number {
+	if (!runtime) return 0;
+	if (runtime.state === 'running') return 5;
+	if (runtime.state === 'error') return 4;
+	if (runtime.state === 'warning') return 3;
+	if (runtime.state === 'done') return 2;
+	return 1;
+}
+
+function getPrimaryRuntime(): any {
+	const candidates = [panelModel.runtimes.search, panelModel.runtimes.index].filter(Boolean);
+	candidates.sort((a, b) => runtimePriority(b) - runtimePriority(a));
+	return candidates[0] || null;
+}
+
+function renderStatusHtml(): string {
+	const primary = getPrimaryRuntime();
+	const statusText = primary?.statusText || panelModel.response?.statusText || '准备就绪';
+	const detail = primary?.detail || '';
+	const metaText = panelModel.response ? `分组 ${panelModel.response.groups.length} · 结果 ${panelModel.response.resultCount}` : '';
+	return `
+		<div class="sw-status">
+			<div class="sw-status-main">
+				<div id="statusText">${escapeHtml(statusText)}</div>
+				<div id="statusDetail" class="sw-status-detail">${escapeHtml(detail)}</div>
+			</div>
+			<div id="metaText" class="sw-status-meta">${escapeHtml(metaText)}</div>
+		</div>
+	`;
+}
+
+function renderRuntimeCardsHtml(): string {
+	const order: RuntimeKind[] = ['index', 'search'];
+	const cards = order
+		.map(kind => panelModel.runtimes[kind])
+		.filter(Boolean)
+		.map(runtime => {
+			const percentText = runtime.percent == null ? '—' : `${runtime.percent}%`;
+			const progressWidth = runtime.percent == null ? 0 : Math.max(0, Math.min(100, runtime.percent));
+			const errors = Array.isArray(runtime.errors) ? runtime.errors : [];
+			return `
+				<section class="runtime-card ${escapeHtml(runtime.state || 'idle')}">
+					<div class="runtime-head">
+						<div class="runtime-kind">${runtime.kind === 'index' ? '索引状态' : '搜索状态'}</div>
+						<div class="runtime-phase">${escapeHtml(runtime.phase || '')}</div>
+					</div>
+					<div class="runtime-main">
+						<div class="runtime-line"><span>${escapeHtml(runtime.statusText || '—')}</span><strong>${escapeHtml(percentText)}</strong></div>
+						<div class="runtime-progress ${runtime.percent == null ? 'indeterminate' : ''}"><div class="runtime-progress-fill" style="width:${progressWidth}%"></div></div>
+						<div class="runtime-detail">${escapeHtml(runtime.detail || '') || '—'}</div>
+						<div class="runtime-stats">已处理 ${escapeHtml(String(runtime.processed || 0))}${runtime.total ? ` / ${escapeHtml(String(runtime.total))}` : ''}</div>
+						${runtime.currentLabel ? `<div class="runtime-current">当前：${escapeHtml(runtime.currentLabel)}</div>` : ''}
+						${errors.length ? `<div class="runtime-errors">${errors.map((item: any) => `<div class="runtime-error-item"><span>${escapeHtml(item.stage || 'error')}</span><strong>${escapeHtml(item.item || '')}</strong><em>${escapeHtml(item.message || '')}</em></div>`).join('')}</div>` : ''}
+					</div>
+				</section>
+			`;
+		});
+	return `<div id="runtimeRoot" class="sw-runtime-root">${cards.join('')}</div>`;
+}
+
+function renderResultsHtml(): string {
+	if (!panelModel.response) return '<div id="resultsRoot" class="sw-results"><div class="empty">还没有结果。</div></div>';
+	if (!panelModel.response.groups.length) return '<div id="resultsRoot" class="sw-results"><div class="empty">没有匹配结果。</div></div>';
+	return `
+		<div id="resultsRoot" class="sw-results">
+			${panelModel.response.groups.map((group: any) => `
+				<section class="result-group">
+					<div class="group-title">${escapeHtml(group.label)} <span>${group.items.length}</span></div>
+					<div class="group-list">
+						${group.items.map((item: any) => {
+							const snippets = (item.snippets || []).map((snippet: any) => `
+								<button class="snippet-item" data-note-id="${escapeAttribute(item.noteId)}" data-section-slug="${escapeAttribute(snippet.sectionSlug || '')}" data-line="${Number(snippet.line || 0)}">
+									<div class="snippet-meta">
+										<span class="badge">${escapeHtml(snippet.blockType)}</span>
+										<span>行 ${snippet.line || '标题'}</span>
+										${snippet.sectionText ? `<span class="section">${escapeHtml(snippet.sectionText)}</span>` : ''}
+									</div>
+									<div class="snippet-text">${highlightText(snippet.text, snippet.highlights)}</div>
+								</button>
+							`).join('');
+							return `
+								<article class="result-item">
+									<div class="result-header">
+										<div>
+											<div class="result-title">${highlightText(item.title, (item.snippets && item.snippets[0] && item.snippets[0].highlights) || [])}</div>
+											<div class="result-path">${escapeHtml(item.folderPath)} · ${item.noteType === 'todo' ? '待办' : '笔记'}</div>
+										</div>
+										<div class="result-side">
+											<div>分数 ${Math.round(item.score)}</div>
+											<div>使用 ${item.usageCount || 0}</div>
+										</div>
+									</div>
+									<div class="result-times">
+										<span>改：${escapeHtml(formatTime(item.updatedTime))}</span>
+										<span>建：${escapeHtml(formatTime(item.createdTime))}</span>
+										<span>看：${escapeHtml(formatTime(item.lastViewed))}</span>
+									</div>
+									<div class="snippet-list">${snippets}</div>
+								</article>
+							`;
+						}).join('')}
+					</div>
+				</section>
+			`).join('')}
+		</div>
+	`;
+}
+
 function createPanelHtml(): string {
+	const request = cloneRequest(panelModel.request) as SearchRequest;
 	const payload = escapeScriptJson(serialisePanelModel());
 	return `
 		<div class="sw-root">
@@ -205,73 +343,66 @@ function createPanelHtml(): string {
 
 			<div class="sw-form">
 				<div class="sw-row query-row">
-					<input id="queryInput" class="sw-input" type="text" placeholder="搜正文、标题、代码块、引用、Markdown 标记...">
+					<input id="queryInput" class="sw-input" type="text" placeholder="搜正文、标题、代码块、引用、Markdown 标记..." value="${escapeAttribute(request.query || '')}">
 					<button id="searchBtn" class="sw-btn">搜索</button>
 				</div>
 
 				<div class="sw-row compact-grid">
 					<label><span>模式</span><select id="modeSelect" class="sw-select">
-						<option value="smart">智能</option>
-						<option value="literal">精确文本</option>
-						<option value="regex">正则</option>
+						<option value="smart"${selected(request.mode, 'smart')}>智能</option>
+						<option value="literal"${selected(request.mode, 'literal')}>精确文本</option>
+						<option value="regex"${selected(request.mode, 'regex')}>正则</option>
 					</select></label>
 					<label><span>范围</span><select id="scopeSelect" class="sw-select">
-						<option value="all">标题 + 正文</option>
-						<option value="title">仅标题</option>
-						<option value="body">仅正文</option>
+						<option value="all"${selected(request.scope, 'all')}>标题 + 正文</option>
+						<option value="title"${selected(request.scope, 'title')}>仅标题</option>
+						<option value="body"${selected(request.scope, 'body')}>仅正文</option>
 					</select></label>
 					<label><span>排序</span><select id="sortBySelect" class="sw-select">
-						<option value="relevance">相关度</option>
-						<option value="updated">更改日期</option>
-						<option value="created">创建日期</option>
-						<option value="lastViewed">上次查看</option>
-						<option value="usageCount">使用次数</option>
-						<option value="title">标题</option>
-						<option value="bodyLength">笔记长度</option>
+						<option value="relevance"${selected(request.sortBy, 'relevance')}>相关度</option>
+						<option value="updated"${selected(request.sortBy, 'updated')}>更改日期</option>
+						<option value="created"${selected(request.sortBy, 'created')}>创建日期</option>
+						<option value="lastViewed"${selected(request.sortBy, 'lastViewed')}>上次查看</option>
+						<option value="usageCount"${selected(request.sortBy, 'usageCount')}>使用次数</option>
+						<option value="title"${selected(request.sortBy, 'title')}>标题</option>
+						<option value="bodyLength"${selected(request.sortBy, 'bodyLength')}>笔记长度</option>
 					</select></label>
 					<label><span>顺序</span><select id="sortDirSelect" class="sw-select">
-						<option value="desc">降序</option>
-						<option value="asc">升序</option>
+						<option value="desc"${selected(request.sortDir, 'desc')}>降序</option>
+						<option value="asc"${selected(request.sortDir, 'asc')}>升序</option>
 					</select></label>
 					<label><span>分组</span><select id="groupBySelect" class="sw-select">
-						<option value="none">不分组</option>
-						<option value="folder">按笔记本</option>
-						<option value="updatedMonth">按更新时间月份</option>
-						<option value="noteType">按笔记类型</option>
+						<option value="none"${selected(request.groupBy, 'none')}>不分组</option>
+						<option value="folder"${selected(request.groupBy, 'folder')}>按笔记本</option>
+						<option value="updatedMonth"${selected(request.groupBy, 'updatedMonth')}>按更新时间月份</option>
+						<option value="noteType"${selected(request.groupBy, 'noteType')}>按笔记类型</option>
 					</select></label>
 				</div>
 
 				<div class="sw-row compact-grid">
-					<label><span>笔记本筛选</span><input id="notebookInput" class="sw-input" type="text" placeholder="模糊匹配路径"></label>
+					<label><span>笔记本筛选</span><input id="notebookInput" class="sw-input" type="text" placeholder="模糊匹配路径" value="${escapeAttribute(request.notebookQuery || '')}"></label>
 					<label><span>笔记类型</span><select id="noteTypeSelect" class="sw-select">
-						<option value="all">全部</option>
-						<option value="note">普通笔记</option>
-						<option value="todo">待办笔记</option>
+						<option value="all"${selected(request.noteType, 'all')}>全部</option>
+						<option value="note"${selected(request.noteType, 'note')}>普通笔记</option>
+						<option value="todo"${selected(request.noteType, 'todo')}>待办笔记</option>
 					</select></label>
 					<label><span>时间字段</span><select id="dateFieldSelect" class="sw-select">
-						<option value="updated">更改日期</option>
-						<option value="created">创建日期</option>
-						<option value="lastViewed">上次查看</option>
+						<option value="updated"${selected(request.dateField, 'updated')}>更改日期</option>
+						<option value="created"${selected(request.dateField, 'created')}>创建日期</option>
+						<option value="lastViewed"${selected(request.dateField, 'lastViewed')}>上次查看</option>
 					</select></label>
-					<label><span>开始</span><input id="dateFromInput" class="sw-input" type="date"></label>
-					<label><span>结束</span><input id="dateToInput" class="sw-input" type="date"></label>
+					<label><span>开始</span><input id="dateFromInput" class="sw-input" type="date" value="${escapeAttribute(request.dateFrom || '')}"></label>
+					<label><span>结束</span><input id="dateToInput" class="sw-input" type="date" value="${escapeAttribute(request.dateTo || '')}"></label>
 				</div>
 
 				<div class="sw-row check-row">
-					<label class="check-item"><input id="caseSensitiveInput" type="checkbox"> 区分大小写</label>
+					<label class="check-item"><input id="caseSensitiveInput" type="checkbox"${checked(!!request.caseSensitive)}> 区分大小写</label>
 				</div>
 			</div>
 
-			<div class="sw-status">
-				<div class="sw-status-main">
-					<div id="statusText">准备就绪</div>
-					<div id="statusDetail" class="sw-status-detail"></div>
-				</div>
-				<div id="metaText" class="sw-status-meta"></div>
-			</div>
-
-			<div id="runtimeRoot" class="sw-runtime-root"></div>
-			<div id="resultsRoot" class="sw-results"></div>
+			${renderStatusHtml()}
+			${renderRuntimeCardsHtml()}
+			${renderResultsHtml()}
 		</div>
 		<script id="initialState" type="application/json">${payload}</script>
 	`;
