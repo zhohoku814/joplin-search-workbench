@@ -1,13 +1,24 @@
 {
   "name": "joplin-plugin-search-workbench",
-  "version": "0.3.1",
+  "version": "0.3.2",
+  "description": "A VS Code-style search workbench for Joplin / 适用于 Joplin 的 VS Code 风格搜索工作台，支持片段预览、高亮、分组、排序、正则与时间过滤。",
+  "author": "zhohoku814",
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/zhohoku814/joplin-search-workbench",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhohoku814/joplin-search-workbench.git"
+  },
   "scripts": {
-    "test": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\run-node-tests.js\"", 
+    "test": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\run-node-tests.js\"",
     "dist": "powershell.exe -NoProfile -Command \"Set-Location -LiteralPath $env:INIT_CWD; & $env:npm_node_execpath .\\scripts\\build-plugin.js\""
   },
-  "license": "AGPL-3.0-or-later",
   "keywords": [
-    "joplin-plugin"
+    "joplin-plugin",
+    "joplin",
+    "search",
+    "regex",
+    "snippet"
   ],
   "files": [
     "publish"

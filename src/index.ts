@@ -14,11 +14,13 @@ const {
 	normaliseNewlines,
 	searchNotesWithProgress,
 } = require('./searchCore');
+const { createUi } = require('./i18n');
 const { cloneRequest } = require('./panelClientState');
 
 const PANEL_ID = 'searchWorkbench.panel';
 const SETTINGS_SECTION = 'searchWorkbench';
 const SETTINGS_STATS = 'searchWorkbench.noteStats';
+const SETTINGS_UI_LANGUAGE = 'searchWorkbench.uiLanguage';
 const PAGE_SIZE = 100;
 const MAX_RESULTS = 200;
 
@@ -31,6 +33,7 @@ type DateField = 'updated' | 'created' | 'lastViewed';
 type NoteTypeFilter = 'all' | 'note' | 'todo';
 
 type RuntimeKind = 'index' | 'search';
+type UiLanguage = 'auto' | 'zh-CN' | 'en';
 
 interface NoteStats {
 	usageCount: number;
@@ -91,6 +94,7 @@ interface PanelMeta {
 	indexDirty: boolean;
 	lastAction: string;
 	revision: number;
+	advancedOpen: boolean;
 }
 
 interface PanelModel {
@@ -118,6 +122,8 @@ let noteStats: Record<string, NoteStats> = {};
 let saveStatsTimer: NodeJS.Timeout | null = null;
 let lastSelectedNoteId = '';
 let searchRunId = 0;
+let uiLanguageSetting: UiLanguage = 'auto';
+let ui = createUi('auto', Intl.DateTimeFormat().resolvedOptions().locale);
 let panelModel: PanelModel = createPanelModel();
 
 function createDefaultRequest(): SearchRequest {
@@ -134,10 +140,28 @@ function createPanelModel(): PanelModel {
 		},
 		meta: {
 			indexDirty: true,
-			lastAction: '初始化',
+			lastAction: 'init',
 			revision: 0,
+			advancedOpen: false,
 		},
 	};
+}
+
+function t(key: string, vars?: Record<string, any>) {
+	return ui.t(key, vars);
+}
+
+function reasonLabel(reason: string) {
+	return t(`reason.${reason}`);
+}
+
+function localeString(ts: number) {
+	return new Date(ts).toLocaleString(ui.locale);
+}
+
+async function reloadUi() {
+	uiLanguageSetting = (await joplin.settings.value(SETTINGS_UI_LANGUAGE) || 'auto') as UiLanguage;
+	ui = createUi(uiLanguageSetting, Intl.DateTimeFormat().resolvedOptions().locale);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -145,7 +169,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function toErrorMessage(error: any): string {
-	if (!error) return '未知错误';
+	if (!error) return t('common.unknownError');
 	if (typeof error === 'string') return error;
 	if (error.message) return String(error.message);
 	return String(error);
@@ -177,6 +201,7 @@ function escapeScriptJson(data: any): string {
 function serialisePanelModel() {
 	return {
 		request: cloneRequest(panelModel.request),
+		defaultRequest: createDefaultRequest(),
 		response: panelModel.response,
 		runtimes: {
 			index: panelModel.runtimes.index,
@@ -185,7 +210,10 @@ function serialisePanelModel() {
 		meta: {
 			...panelModel.meta,
 			indexDirty: cacheDirty,
+			locale: ui.locale,
 		},
+		messages: ui.messages,
+		dictionary: ui.dict,
 	};
 }
 
@@ -202,8 +230,8 @@ function escapeAttribute(text: string): string {
 }
 
 function formatTime(ts: number): string {
-	if (!ts) return '—';
-	return new Date(ts).toLocaleString();
+	if (!ts) return t('common.noValue');
+	return localeString(ts);
 }
 
 function highlightText(text: string, highlights: string[] = []): string {
@@ -233,11 +261,41 @@ function getPrimaryRuntime(): any {
 	return candidates[0] || null;
 }
 
+function countActiveFilters(request: SearchRequest): number {
+	const defaults = createDefaultRequest();
+	let count = 0;
+	const fields: Array<keyof SearchRequest> = [
+		'mode',
+		'scope',
+		'caseSensitive',
+		'noteType',
+		'notebookQuery',
+		'dateField',
+		'dateFrom',
+		'dateTo',
+		'sortBy',
+		'sortDir',
+		'groupBy',
+	];
+	for (const field of fields) {
+		if (request[field] !== defaults[field]) count += 1;
+	}
+	return count;
+}
+
+function phaseLabel(phase: string): string {
+	return t(`phase.${phase || ''}`);
+}
+
+function blockTypeLabel(blockType: string): string {
+	return t(`block.${blockType || ''}`);
+}
+
 function renderStatusHtml(): string {
 	const primary = getPrimaryRuntime();
-	const statusText = primary?.statusText || panelModel.response?.statusText || '准备就绪';
+	const statusText = primary?.statusText || panelModel.response?.statusText || t('status.ready');
 	const detail = primary?.detail || '';
-	const metaText = panelModel.response ? `分组 ${panelModel.response.groups.length} · 结果 ${panelModel.response.resultCount}` : '';
+	const metaText = panelModel.response ? t('status.meta', { groups: panelModel.response.groups.length, results: panelModel.response.resultCount }) : '';
 	return `
 		<div class="sw-status">
 			<div class="sw-status-main">
@@ -255,21 +313,21 @@ function renderRuntimeCardsHtml(): string {
 		.map(kind => panelModel.runtimes[kind])
 		.filter(Boolean)
 		.map(runtime => {
-			const percentText = runtime.percent == null ? '—' : `${runtime.percent}%`;
+			const percentText = runtime.percent == null ? t('common.noValue') : `${runtime.percent}%`;
 			const progressWidth = runtime.percent == null ? 0 : Math.max(0, Math.min(100, runtime.percent));
 			const errors = Array.isArray(runtime.errors) ? runtime.errors : [];
 			return `
 				<section class="runtime-card ${escapeHtml(runtime.state || 'idle')}">
 					<div class="runtime-head">
-						<div class="runtime-kind">${runtime.kind === 'index' ? '索引状态' : '搜索状态'}</div>
-						<div class="runtime-phase">${escapeHtml(runtime.phase || '')}</div>
+						<div class="runtime-kind">${escapeHtml(runtime.kind === 'index' ? t('runtime.index') : t('runtime.search'))}</div>
+						<div class="runtime-phase">${escapeHtml(phaseLabel(runtime.phase || ''))}</div>
 					</div>
 					<div class="runtime-main">
-						<div class="runtime-line"><span>${escapeHtml(runtime.statusText || '—')}</span><strong>${escapeHtml(percentText)}</strong></div>
+						<div class="runtime-line"><span>${escapeHtml(runtime.statusText || t('common.noValue'))}</span><strong>${escapeHtml(percentText)}</strong></div>
 						<div class="runtime-progress ${runtime.percent == null ? 'indeterminate' : ''}"><div class="runtime-progress-fill" style="width:${progressWidth}%"></div></div>
-						<div class="runtime-detail">${escapeHtml(runtime.detail || '') || '—'}</div>
-						<div class="runtime-stats">已处理 ${escapeHtml(String(runtime.processed || 0))}${runtime.total ? ` / ${escapeHtml(String(runtime.total))}` : ''}</div>
-						${runtime.currentLabel ? `<div class="runtime-current">当前：${escapeHtml(runtime.currentLabel)}</div>` : ''}
+						<div class="runtime-detail">${escapeHtml(runtime.detail || '') || escapeHtml(t('common.noValue'))}</div>
+						<div class="runtime-stats">${escapeHtml(t('runtime.processed', { processed: String(runtime.processed || 0), suffix: runtime.total ? ` / ${runtime.total}` : '' }))}</div>
+						${runtime.currentLabel ? `<div class="runtime-current">${escapeHtml(t('runtime.current', { label: runtime.currentLabel }))}</div>` : ''}
 						${errors.length ? `<div class="runtime-errors">${errors.map((item: any) => `<div class="runtime-error-item"><span>${escapeHtml(item.stage || 'error')}</span><strong>${escapeHtml(item.item || '')}</strong><em>${escapeHtml(item.message || '')}</em></div>`).join('')}</div>` : ''}
 					</div>
 				</section>
@@ -279,8 +337,8 @@ function renderRuntimeCardsHtml(): string {
 }
 
 function renderResultsHtml(): string {
-	if (!panelModel.response) return '<div id="resultsRoot" class="sw-results"><div class="empty">还没有结果。</div></div>';
-	if (!panelModel.response.groups.length) return '<div id="resultsRoot" class="sw-results"><div class="empty">没有匹配结果。</div></div>';
+	if (!panelModel.response) return `<div id="resultsRoot" class="sw-results"><div class="empty">${escapeHtml(t('empty.noResultsYet'))}</div></div>`;
+	if (!panelModel.response.groups.length) return `<div id="resultsRoot" class="sw-results"><div class="empty">${escapeHtml(t('empty.noMatches'))}</div></div>`;
 	return `
 		<div id="resultsRoot" class="sw-results">
 			${panelModel.response.groups.map((group: any) => `
@@ -291,8 +349,8 @@ function renderResultsHtml(): string {
 							const snippets = (item.snippets || []).map((snippet: any) => `
 								<button class="snippet-item" data-note-id="${escapeAttribute(item.noteId)}" data-section-slug="${escapeAttribute(snippet.sectionSlug || '')}" data-line="${Number(snippet.line || 0)}">
 									<div class="snippet-meta">
-										<span class="badge">${escapeHtml(snippet.blockType)}</span>
-										<span>行 ${snippet.line || '标题'}</span>
+										<span class="badge">${escapeHtml(blockTypeLabel(snippet.blockType))}</span>
+										<span>${escapeHtml(snippet.line ? t('snippet.line', { line: snippet.line }) : t('snippet.title'))}</span>
 										${snippet.sectionText ? `<span class="section">${escapeHtml(snippet.sectionText)}</span>` : ''}
 									</div>
 									<div class="snippet-text">${highlightText(snippet.text, snippet.highlights)}</div>
@@ -303,17 +361,17 @@ function renderResultsHtml(): string {
 									<div class="result-header">
 										<div>
 											<div class="result-title">${highlightText(item.title, (item.snippets && item.snippets[0] && item.snippets[0].highlights) || [])}</div>
-											<div class="result-path">${escapeHtml(item.folderPath)} · ${item.noteType === 'todo' ? '待办' : '笔记'}</div>
+											<div class="result-path">${escapeHtml(item.folderPath)} · ${escapeHtml(t(item.noteType === 'todo' ? 'noteType.todo' : 'noteType.note'))}</div>
 										</div>
 										<div class="result-side">
-											<div>分数 ${Math.round(item.score)}</div>
-											<div>使用 ${item.usageCount || 0}</div>
+											<div>${escapeHtml(t('result.score', { score: Math.round(item.score) }))}</div>
+											<div>${escapeHtml(t('result.usage', { count: item.usageCount || 0 }))}</div>
 										</div>
 									</div>
 									<div class="result-times">
-										<span>改：${escapeHtml(formatTime(item.updatedTime))}</span>
-										<span>建：${escapeHtml(formatTime(item.createdTime))}</span>
-										<span>看：${escapeHtml(formatTime(item.lastViewed))}</span>
+										<span>${escapeHtml(t('result.updated', { value: formatTime(item.updatedTime) }))}</span>
+										<span>${escapeHtml(t('result.created', { value: formatTime(item.createdTime) }))}</span>
+										<span>${escapeHtml(t('result.viewed', { value: formatTime(item.lastViewed) }))}</span>
 									</div>
 									<div class="snippet-list">${snippets}</div>
 								</article>
@@ -329,74 +387,82 @@ function renderResultsHtml(): string {
 function createPanelHtml(): string {
 	const request = cloneRequest(panelModel.request) as SearchRequest;
 	const payload = escapeScriptJson(serialisePanelModel());
+	const activeFilterCount = countActiveFilters(request);
+	const advancedLabel = activeFilterCount > 0 ? `${t('panel.advancedFilters')} (${activeFilterCount})` : t('panel.advancedFilters');
 	return `
 		<div class="sw-root">
 			<div class="sw-header">
 				<div>
-					<div class="sw-title">Search Workbench</div>
-					<div class="sw-subtitle">像 VS Code 一样先看内容，再决定进不进去</div>
-				</div>
-				<div class="sw-header-actions">
-					<button id="refreshIndexBtn" class="sw-btn secondary">重建索引</button>
+					<div class="sw-title">${escapeHtml(t('panel.title'))}</div>
+					<div class="sw-subtitle">${escapeHtml(t('panel.subtitle'))}</div>
 				</div>
 			</div>
 
 			<div class="sw-form">
 				<div class="sw-row query-row">
-					<input id="queryInput" class="sw-input" type="text" placeholder="搜正文、标题、代码块、引用、Markdown 标记..." value="${escapeAttribute(request.query || '')}">
-					<button id="searchBtn" class="sw-btn">搜索</button>
+					<input id="queryInput" class="sw-input" type="text" placeholder="${escapeAttribute(t('panel.searchPlaceholder'))}" value="${escapeAttribute(request.query || '')}">
+					<button id="searchBtn" class="sw-btn">${escapeHtml(t('button.search'))}</button>
 				</div>
 
-				<div class="sw-row compact-grid">
-					<label><span>模式</span><select id="modeSelect" class="sw-select">
-						<option value="smart"${selected(request.mode, 'smart')}>智能</option>
-						<option value="literal"${selected(request.mode, 'literal')}>精确文本</option>
-						<option value="regex"${selected(request.mode, 'regex')}>正则</option>
-					</select></label>
-					<label><span>范围</span><select id="scopeSelect" class="sw-select">
-						<option value="all"${selected(request.scope, 'all')}>标题 + 正文</option>
-						<option value="title"${selected(request.scope, 'title')}>仅标题</option>
-						<option value="body"${selected(request.scope, 'body')}>仅正文</option>
-					</select></label>
-					<label><span>排序</span><select id="sortBySelect" class="sw-select">
-						<option value="relevance"${selected(request.sortBy, 'relevance')}>相关度</option>
-						<option value="updated"${selected(request.sortBy, 'updated')}>更改日期</option>
-						<option value="created"${selected(request.sortBy, 'created')}>创建日期</option>
-						<option value="lastViewed"${selected(request.sortBy, 'lastViewed')}>上次查看</option>
-						<option value="usageCount"${selected(request.sortBy, 'usageCount')}>使用次数</option>
-						<option value="title"${selected(request.sortBy, 'title')}>标题</option>
-						<option value="bodyLength"${selected(request.sortBy, 'bodyLength')}>笔记长度</option>
-					</select></label>
-					<label><span>顺序</span><select id="sortDirSelect" class="sw-select">
-						<option value="desc"${selected(request.sortDir, 'desc')}>降序</option>
-						<option value="asc"${selected(request.sortDir, 'asc')}>升序</option>
-					</select></label>
-					<label><span>分组</span><select id="groupBySelect" class="sw-select">
-						<option value="none"${selected(request.groupBy, 'none')}>不分组</option>
-						<option value="folder"${selected(request.groupBy, 'folder')}>按笔记本</option>
-						<option value="updatedMonth"${selected(request.groupBy, 'updatedMonth')}>按更新时间月份</option>
-						<option value="noteType"${selected(request.groupBy, 'noteType')}>按笔记类型</option>
-					</select></label>
+				<div class="sw-row action-row">
+					<button id="advancedToggleBtn" class="sw-btn secondary">${escapeHtml(advancedLabel)}</button>
+					<button id="resetFiltersBtn" class="sw-btn secondary">${escapeHtml(t('button.resetFilters'))}</button>
+					<button id="clearAllBtn" class="sw-btn secondary">${escapeHtml(t('button.clearAll'))}</button>
+					<button id="refreshIndexBtn" class="sw-btn secondary">${escapeHtml(t('button.rebuildIndex'))}</button>
 				</div>
 
-				<div class="sw-row compact-grid">
-					<label><span>笔记本筛选</span><input id="notebookInput" class="sw-input" type="text" placeholder="模糊匹配路径" value="${escapeAttribute(request.notebookQuery || '')}"></label>
-					<label><span>笔记类型</span><select id="noteTypeSelect" class="sw-select">
-						<option value="all"${selected(request.noteType, 'all')}>全部</option>
-						<option value="note"${selected(request.noteType, 'note')}>普通笔记</option>
-						<option value="todo"${selected(request.noteType, 'todo')}>待办笔记</option>
-					</select></label>
-					<label><span>时间字段</span><select id="dateFieldSelect" class="sw-select">
-						<option value="updated"${selected(request.dateField, 'updated')}>更改日期</option>
-						<option value="created"${selected(request.dateField, 'created')}>创建日期</option>
-						<option value="lastViewed"${selected(request.dateField, 'lastViewed')}>上次查看</option>
-					</select></label>
-					<label><span>开始</span><input id="dateFromInput" class="sw-input" type="date" value="${escapeAttribute(request.dateFrom || '')}"></label>
-					<label><span>结束</span><input id="dateToInput" class="sw-input" type="date" value="${escapeAttribute(request.dateTo || '')}"></label>
-				</div>
+				<div class="sw-advanced ${panelModel.meta.advancedOpen ? 'open' : 'collapsed'}">
+					<div class="sw-row compact-grid">
+						<label><span>${escapeHtml(t('field.mode'))}</span><select id="modeSelect" class="sw-select">
+							<option value="smart"${selected(request.mode, 'smart')}>${escapeHtml(t('option.mode.smart'))}</option>
+							<option value="literal"${selected(request.mode, 'literal')}>${escapeHtml(t('option.mode.literal'))}</option>
+							<option value="regex"${selected(request.mode, 'regex')}>${escapeHtml(t('option.mode.regex'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.scope'))}</span><select id="scopeSelect" class="sw-select">
+							<option value="all"${selected(request.scope, 'all')}>${escapeHtml(t('option.scope.all'))}</option>
+							<option value="title"${selected(request.scope, 'title')}>${escapeHtml(t('option.scope.title'))}</option>
+							<option value="body"${selected(request.scope, 'body')}>${escapeHtml(t('option.scope.body'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.sortBy'))}</span><select id="sortBySelect" class="sw-select">
+							<option value="relevance"${selected(request.sortBy, 'relevance')}>${escapeHtml(t('option.sortBy.relevance'))}</option>
+							<option value="updated"${selected(request.sortBy, 'updated')}>${escapeHtml(t('option.sortBy.updated'))}</option>
+							<option value="created"${selected(request.sortBy, 'created')}>${escapeHtml(t('option.sortBy.created'))}</option>
+							<option value="lastViewed"${selected(request.sortBy, 'lastViewed')}>${escapeHtml(t('option.sortBy.lastViewed'))}</option>
+							<option value="usageCount"${selected(request.sortBy, 'usageCount')}>${escapeHtml(t('option.sortBy.usageCount'))}</option>
+							<option value="title"${selected(request.sortBy, 'title')}>${escapeHtml(t('option.sortBy.title'))}</option>
+							<option value="bodyLength"${selected(request.sortBy, 'bodyLength')}>${escapeHtml(t('option.sortBy.bodyLength'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.sortDir'))}</span><select id="sortDirSelect" class="sw-select">
+							<option value="desc"${selected(request.sortDir, 'desc')}>${escapeHtml(t('option.sortDir.desc'))}</option>
+							<option value="asc"${selected(request.sortDir, 'asc')}>${escapeHtml(t('option.sortDir.asc'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.groupBy'))}</span><select id="groupBySelect" class="sw-select">
+							<option value="none"${selected(request.groupBy, 'none')}>${escapeHtml(t('option.groupBy.none'))}</option>
+							<option value="folder"${selected(request.groupBy, 'folder')}>${escapeHtml(t('option.groupBy.folder'))}</option>
+							<option value="updatedMonth"${selected(request.groupBy, 'updatedMonth')}>${escapeHtml(t('option.groupBy.updatedMonth'))}</option>
+							<option value="noteType"${selected(request.groupBy, 'noteType')}>${escapeHtml(t('option.groupBy.noteType'))}</option>
+						</select></label>
+					</div>
 
-				<div class="sw-row check-row">
-					<label class="check-item"><input id="caseSensitiveInput" type="checkbox"${checked(!!request.caseSensitive)}> 区分大小写</label>
+					<div class="sw-row compact-grid">
+						<label><span>${escapeHtml(t('field.notebookQuery'))}</span><input id="notebookInput" class="sw-input" type="text" placeholder="${escapeAttribute(t('panel.notebookPlaceholder'))}" value="${escapeAttribute(request.notebookQuery || '')}"></label>
+						<label><span>${escapeHtml(t('field.noteType'))}</span><select id="noteTypeSelect" class="sw-select">
+							<option value="all"${selected(request.noteType, 'all')}>${escapeHtml(t('option.noteType.all'))}</option>
+							<option value="note"${selected(request.noteType, 'note')}>${escapeHtml(t('option.noteType.note'))}</option>
+							<option value="todo"${selected(request.noteType, 'todo')}>${escapeHtml(t('option.noteType.todo'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.dateField'))}</span><select id="dateFieldSelect" class="sw-select">
+							<option value="updated"${selected(request.dateField, 'updated')}>${escapeHtml(t('option.dateField.updated'))}</option>
+							<option value="created"${selected(request.dateField, 'created')}>${escapeHtml(t('option.dateField.created'))}</option>
+							<option value="lastViewed"${selected(request.dateField, 'lastViewed')}>${escapeHtml(t('option.dateField.lastViewed'))}</option>
+						</select></label>
+						<label><span>${escapeHtml(t('field.dateFrom'))}</span><input id="dateFromInput" class="sw-input" type="date" value="${escapeAttribute(request.dateFrom || '')}"></label>
+						<label><span>${escapeHtml(t('field.dateTo'))}</span><input id="dateToInput" class="sw-input" type="date" value="${escapeAttribute(request.dateTo || '')}"></label>
+					</div>
+
+					<div class="sw-row check-row">
+						<label class="check-item"><input id="caseSensitiveInput" type="checkbox"${checked(!!request.caseSensitive)}> ${escapeHtml(t('field.caseSensitive'))}</label>
+					</div>
 				</div>
 			</div>
 
@@ -457,26 +523,26 @@ function setRuntime(kind: RuntimeKind, runtime: any) {
 	});
 }
 
-function buildStaleIndexRuntime(reason: string) {
+function buildStaleIndexRuntime(reasonKey: string) {
 	const knownCount = cachedNotes.length;
 	return makeTaskProgress({
 		kind: 'index',
 		phase: 'stale',
 		state: 'warning',
-		statusText: '索引待更新',
-		detail: `检测到${reason}，下一次搜索或手动重建时会刷新索引。`,
+		statusText: t('index.stale'),
+		detail: t('index.staleDetail', { reason: reasonLabel(reasonKey) }),
 		processed: knownCount,
 		total: knownCount || 0,
 	});
 }
 
-function markIndexDirty(reason = '内容变化') {
+function markIndexDirty(reasonKey = 'contentChanged') {
 	cacheDirty = true;
 	updatePanelModel({
-		runtimes: { index: buildStaleIndexRuntime(reason) } as Record<RuntimeKind, any>,
+		runtimes: { index: buildStaleIndexRuntime(reasonKey) } as Record<RuntimeKind, any>,
 		meta: {
 			indexDirty: true,
-			lastAction: `索引标记为过期：${reason}`,
+			lastAction: `index-dirty:${reasonKey}`,
 		},
 	});
 }
@@ -487,10 +553,10 @@ function buildFolderPaths(folders: Array<{ id: string; title: string; parent_id?
 
 	const cache = new Map<string, string>();
 	const folderPath = (folderId: string): string => {
-		if (!folderId) return '未分类';
+		if (!folderId) return t('folder.uncategorized');
 		if (cache.has(folderId)) return cache.get(folderId) as string;
 		const folder = byId.get(folderId);
-		if (!folder) return '未知笔记本';
+		if (!folder) return t('group.unknownFolder');
 		const parentPath = folder.parent_id ? folderPath(folder.parent_id) : '';
 		const path = parentPath ? `${parentPath} / ${folder.title}` : folder.title;
 		cache.set(folderId, path);
@@ -527,7 +593,7 @@ async function fetchAll<T = any>(path: string[], fields: string[] = []): Promise
 	return output;
 }
 
-async function countAllNotes(reason: string, errors: RuntimeErrorEntry[]): Promise<number> {
+async function countAllNotes(reasonKey: string, errors: RuntimeErrorEntry[]): Promise<number> {
 	let page = 1;
 	let total = 0;
 	while (true) {
@@ -536,7 +602,7 @@ async function countAllNotes(reason: string, errors: RuntimeErrorEntry[]): Promi
 			response = await joplin.data.get(['notes'], { fields: ['id', 'title'], limit: PAGE_SIZE, page });
 		} catch (error) {
 			pushRuntimeError(errors, 'count-notes', `page:${page}`, error);
-			throw new Error(`统计笔记总量失败（第 ${page} 页）：${toErrorMessage(error)}`);
+			throw new Error(t('index.countFailed', { page, error: toErrorMessage(error) }));
 		}
 
 		const items = Array.isArray(response) ? response : (response?.items || []);
@@ -546,8 +612,8 @@ async function countAllNotes(reason: string, errors: RuntimeErrorEntry[]): Promi
 			kind: 'index',
 			phase: 'count',
 			state: 'running',
-			statusText: `正在统计索引总量（${reason}）...`,
-			detail: `已预扫 ${total} 篇笔记`,
+			statusText: t('index.counting', { reason: reasonLabel(reasonKey) }),
+			detail: t('index.scannedPreview', { count: total }),
 			processed: total,
 			total: 0,
 			currentLabel: lastItem?.title || lastItem?.id || '',
@@ -584,7 +650,7 @@ async function recordSelectedNoteUsage() {
 	scheduleSaveStats();
 }
 
-async function rebuildIndex(reason = '手动刷新') {
+async function rebuildIndex(reasonKey = 'manualRefresh') {
 	if (currentIndexPromise) return currentIndexPromise;
 
 	const previousFolders = cachedFolders;
@@ -593,25 +659,25 @@ async function rebuildIndex(reason = '手动刷新') {
 		const errors: RuntimeErrorEntry[] = [];
 
 		try {
-			updatePanelModel({ meta: { indexDirty: true, lastAction: `开始重建索引：${reason}` } });
+			updatePanelModel({ meta: { indexDirty: true, lastAction: `rebuild-index:${reasonKey}` } });
 			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'start',
 				state: 'running',
-				statusText: `准备重建索引（${reason}）...`,
-				detail: '开始统计笔记总量',
+				statusText: t('index.preparingRebuild', { reason: reasonLabel(reasonKey) }),
+				detail: t('index.startCounting'),
 				processed: 0,
 				total: 0,
 				errors,
 			}));
 
-			const totalNotes = await countAllNotes(reason, errors);
+			const totalNotes = await countAllNotes(reasonKey, errors);
 			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'folders',
 				state: 'running',
-				statusText: `正在读取笔记本结构（${reason}）...`,
-				detail: totalNotes ? `准备建立 ${totalNotes} 篇笔记的索引` : '没有发现笔记',
+				statusText: t('index.readingFolders', { reason: reasonLabel(reasonKey) }),
+				detail: totalNotes ? t('index.preparingBuild', { count: totalNotes }) : t('index.noNotesFound'),
 				processed: 0,
 				total: totalNotes,
 				errors,
@@ -634,7 +700,7 @@ async function rebuildIndex(reason = '手动刷新') {
 					});
 				} catch (error) {
 					pushRuntimeError(errors, 'fetch-note-page', `page:${page}`, error);
-					throw new Error(`读取笔记内容失败（第 ${page} 页）：${toErrorMessage(error)}`);
+					throw new Error(t('index.fetchPageFailed', { page, error: toErrorMessage(error) }));
 				}
 
 				const items = Array.isArray(response) ? response : (response?.items || []);
@@ -644,20 +710,20 @@ async function rebuildIndex(reason = '手动刷新') {
 						const parsed = buildLineMeta(body, uslug);
 						builtNotes.push({
 							id: note.id,
-							title: note.title || '(无标题)',
+							title: note.title || t('common.untitled'),
 							body,
 							parent_id: note.parent_id || '',
 							updated_time: note.updated_time || 0,
 							created_time: note.created_time || 0,
 							is_todo: note.is_todo || 0,
 							todo_completed: note.todo_completed || 0,
-							folderPath: folderMap.get(note.parent_id) || '未知笔记本',
+							folderPath: folderMap.get(note.parent_id) || t('group.unknownFolder'),
 							lines: parsed.lines,
 							lineMeta: parsed.lineMeta,
 							bodyLength: body.length,
 						});
 					} catch (error) {
-						pushRuntimeError(errors, 'parse-note', note.title || note.id || '(未知笔记)', error);
+						pushRuntimeError(errors, 'parse-note', note.title || note.id || t('common.unknownError'), error);
 					}
 
 					processed += 1;
@@ -666,8 +732,8 @@ async function rebuildIndex(reason = '手动刷新') {
 							kind: 'index',
 							phase: 'notes',
 							state: 'running',
-							statusText: `正在重建索引（${reason}）...`,
-							detail: totalNotes ? `已建立 ${processed} / ${totalNotes} 篇笔记` : `已建立 ${processed} 篇笔记`,
+							statusText: t('index.rebuilding', { reason: reasonLabel(reasonKey) }),
+							detail: totalNotes ? t('index.buildProgress', { processed, total: totalNotes }) : t('index.buildProgressNoTotal', { processed }),
 							processed,
 							total: totalNotes,
 							currentLabel: note.title || note.id || '',
@@ -683,13 +749,13 @@ async function rebuildIndex(reason = '手动刷新') {
 			cachedFolders = builtFolders;
 			cachedNotes = builtNotes;
 			cacheDirty = false;
-			updatePanelModel({ meta: { indexDirty: false, lastAction: `索引完成：${reason}` } });
+			updatePanelModel({ meta: { indexDirty: false, lastAction: `index-ready:${reasonKey}` } });
 			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'done',
 				state: errors.length ? 'warning' : 'done',
-				statusText: `索引已就绪：${builtNotes.length} 篇笔记。`,
-				detail: errors.length ? `完成，但有 ${errors.length} 条索引问题（下方显示最近错误）` : '索引建立完成',
+				statusText: t('index.ready', { count: builtNotes.length }),
+				detail: errors.length ? t('index.completeWithIssues', { count: errors.length }) : t('index.complete'),
 				processed: totalNotes || builtNotes.length,
 				total: totalNotes || builtNotes.length,
 				errors,
@@ -698,13 +764,13 @@ async function rebuildIndex(reason = '手动刷新') {
 			cachedFolders = previousFolders;
 			cachedNotes = previousNotes;
 			cacheDirty = true;
-			pushRuntimeError(errors, 'index', reason, error);
-			updatePanelModel({ meta: { indexDirty: true, lastAction: `索引失败：${reason}` } });
+			pushRuntimeError(errors, 'index', reasonKey, error);
+			updatePanelModel({ meta: { indexDirty: true, lastAction: `index-failed:${reasonKey}` } });
 			setRuntime('index', makeTaskProgress({
 				kind: 'index',
 				phase: 'error',
 				state: 'error',
-				statusText: '索引失败',
+				statusText: t('index.failed'),
 				detail: toErrorMessage(error),
 				processed: 0,
 				total: 0,
@@ -719,13 +785,13 @@ async function rebuildIndex(reason = '手动刷新') {
 	return currentIndexPromise;
 }
 
-async function ensureIndexReady(reason = '搜索请求') {
+async function ensureIndexReady() {
 	if (currentIndexPromise) {
 		await currentIndexPromise;
 		return;
 	}
 	if (cacheDirty || !cachedNotes.length) {
-		const rebuildReason = cachedNotes.length ? `自动更新（${reason}）` : '首次建立';
+		const rebuildReason = cachedNotes.length ? 'autoUpdate' : 'firstBuild';
 		await rebuildIndex(rebuildReason);
 	}
 }
@@ -754,11 +820,11 @@ async function openResult(noteId: string, sectionSlug: string, line: number) {
 	}
 
 	if (!opened) {
-		await showToast('没有成功打开目标笔记，可能是当前 Joplin 版本的内部命令名不同。');
+		await showToast(t('toast.openResultFailed'));
 		return;
 	}
 
-	await showToast(line > 0 ? `已打开，命中在第 ${line} 行附近` : '已打开目标笔记');
+	await showToast(line > 0 ? t('toast.openResultNearby', { line }) : t('toast.openResult'));
 }
 
 async function runSearch(requestInput: SearchRequest) {
@@ -766,7 +832,7 @@ async function runSearch(requestInput: SearchRequest) {
 	const currentRunId = ++searchRunId;
 	updatePanelModel({
 		request,
-		meta: { lastAction: `收到搜索请求：${request.query || '(空)'}` },
+		meta: { lastAction: `search:${request.query || t('common.empty')}` },
 	});
 
 	try {
@@ -775,22 +841,22 @@ async function runSearch(requestInput: SearchRequest) {
 				kind: 'search',
 				phase: 'wait-index',
 				state: 'running',
-				statusText: '等待索引完成后再搜索...',
-				detail: '索引进行中，完成后会自动继续',
+				statusText: t('search.waitIndex'),
+				detail: t('search.waitIndexDetail'),
 				processed: 0,
 				total: 0,
 			}));
 		}
-		await ensureIndexReady('搜索请求');
+		await ensureIndexReady();
 	} catch (error) {
 		if (currentRunId !== searchRunId) return;
-		const message = `搜索前索引失败：${toErrorMessage(error)}`;
+		const message = t('search.beforeIndexFailed', { error: toErrorMessage(error) });
 		setRuntime('search', makeTaskProgress({
 			kind: 'search',
 			phase: 'error',
 			state: 'error',
 			statusText: message,
-			detail: '请先查看上方索引错误，修复后再重建索引',
+			detail: t('search.fixIndexFirst'),
 			processed: 0,
 			total: 0,
 		}));
@@ -801,7 +867,7 @@ async function runSearch(requestInput: SearchRequest) {
 				resultCount: 0,
 				groups: [],
 			},
-			meta: { lastAction: '搜索失败' },
+			meta: { lastAction: 'search-failed' },
 		});
 		return;
 	}
@@ -809,6 +875,7 @@ async function runSearch(requestInput: SearchRequest) {
 	const outcome = await searchNotesWithProgress(cachedNotes, noteStats, request, {
 		maxResults: MAX_RESULTS,
 		progressEvery: 20,
+		ui,
 		shouldCancel: () => currentRunId !== searchRunId,
 		onProgress: async (progress: any) => {
 			if (currentRunId !== searchRunId) return;
@@ -819,28 +886,47 @@ async function runSearch(requestInput: SearchRequest) {
 	if (currentRunId !== searchRunId || outcome?.cancelled) return;
 	updatePanelModel({
 		response: outcome.response,
-		meta: { lastAction: '搜索完成' },
+		meta: { lastAction: 'search-done' },
 	});
 	setRuntime('search', outcome.progress);
 }
 
-async function refreshIndexFromUser(reason: string) {
+async function refreshIndexFromUser(reasonKey: string) {
 	cacheDirty = true;
-	updatePanelModel({ meta: { indexDirty: true, lastAction: `收到重建索引请求：${reason}` } });
+	updatePanelModel({ meta: { indexDirty: true, lastAction: `refresh-index:${reasonKey}` } });
 	try {
-		await rebuildIndex(reason);
+		await rebuildIndex(reasonKey);
 		if (panelModel.request.query.trim()) await runSearch(panelModel.request);
 	} catch (_error) {
-		// 错误已通过 runtime 状态显示。
+		// Runtime state already shows the error.
 	}
+}
+
+function resetFiltersState(preserveQuery = true) {
+	const nextRequest = createDefaultRequest();
+	if (preserveQuery) nextRequest.query = panelModel.request.query || '';
+	updatePanelModel({
+		request: nextRequest,
+		response: null,
+		runtimes: { search: null } as Partial<Record<RuntimeKind, any>>,
+		meta: { lastAction: preserveQuery ? 'reset-filters' : 'clear-all' },
+	});
+}
+
+function toggleAdvancedFilters() {
+	updatePanelModel({
+		meta: { advancedOpen: !panelModel.meta.advancedOpen, lastAction: 'toggle-advanced' },
+	});
 }
 
 joplin.plugins.register({
 	onStart: async function() {
+		ui = createUi('auto', Intl.DateTimeFormat().resolvedOptions().locale);
+
 		await joplin.settings.registerSection(SETTINGS_SECTION, {
-			label: 'Search Workbench',
+			label: t('settings.sectionLabel'),
 			iconName: 'fas fa-search',
-			description: 'Search Workbench 的内部数据。使用次数和上次查看会从插件安装后开始累计。',
+			description: t('settings.sectionDescription'),
 		});
 
 		await joplin.settings.registerSettings({
@@ -850,10 +936,25 @@ joplin.plugins.register({
 				public: false,
 				section: SETTINGS_SECTION,
 				storage: SettingStorage.File,
-				label: 'Note stats cache',
+				label: t('settings.statsLabel'),
+			},
+			[SETTINGS_UI_LANGUAGE]: {
+				value: 'auto',
+				type: SettingItemType.String,
+				public: true,
+				isEnum: true,
+				section: SETTINGS_SECTION,
+				label: t('settings.languageLabel'),
+				description: t('settings.languageDescription'),
+				options: {
+					auto: t('settings.language.auto'),
+					'zh-CN': t('settings.language.zh-CN'),
+					en: t('settings.language.en'),
+				},
 			},
 		});
 
+		await reloadUi();
 		await loadStats();
 		panelHandle = await joplin.views.panels.create(PANEL_ID);
 		await renderPanelShell();
@@ -869,7 +970,7 @@ joplin.plugins.register({
 				if (message?.name === 'draftUpdate') {
 					updatePanelModel({
 						request: cloneRequest(message.payload || createDefaultRequest()) as SearchRequest,
-						meta: { lastAction: '收到表单草稿更新' },
+						meta: { lastAction: 'draft-update' },
 					}, { render: false });
 					return { accepted: true };
 				}
@@ -878,20 +979,32 @@ joplin.plugins.register({
 					return { accepted: true };
 				}
 				if (message?.name === 'refreshIndex') {
-					void refreshIndexFromUser('手动刷新');
+					void refreshIndexFromUser('manualRefresh');
+					return { accepted: true };
+				}
+				if (message?.name === 'resetFilters') {
+					resetFiltersState(true);
+					return { accepted: true };
+				}
+				if (message?.name === 'clearAll') {
+					resetFiltersState(false);
+					return { accepted: true };
+				}
+				if (message?.name === 'toggleAdvanced') {
+					toggleAdvancedFilters();
 					return { accepted: true };
 				}
 				if (message?.name === 'openResult') {
 					void openResult(message.payload.noteId, message.payload.sectionSlug, message.payload.line);
 					return { accepted: true };
 				}
-				return { accepted: false, message: '未知命令' };
+				return { accepted: false, message: t('common.unknownCommand') };
 			} catch (error) {
 				setRuntime('index', makeTaskProgress({
 					kind: 'index',
 					phase: 'panel-message-error',
 					state: 'error',
-					statusText: '面板消息处理失败',
+					statusText: t('index.phaseError'),
 					detail: toErrorMessage(error),
 					processed: 0,
 					total: 0,
@@ -903,7 +1016,7 @@ joplin.plugins.register({
 
 		await joplin.commands.register({
 			name: 'searchWorkbench.togglePanel',
-			label: '显示/隐藏 Search Workbench',
+			label: t('command.togglePanel'),
 			iconName: 'fas fa-search',
 			execute: async () => {
 				const visible = await joplin.views.panels.visible(panelHandle);
@@ -913,10 +1026,10 @@ joplin.plugins.register({
 
 		await joplin.commands.register({
 			name: 'searchWorkbench.refreshIndex',
-			label: '重建 Search Workbench 索引',
+			label: t('command.rebuildIndex'),
 			iconName: 'fas fa-rotate',
 			execute: async () => {
-				await refreshIndexFromUser('命令触发');
+				await refreshIndexFromUser('commandTriggered');
 			},
 		});
 
@@ -929,17 +1042,23 @@ joplin.plugins.register({
 		});
 
 		await joplin.workspace.onNoteChange(async () => {
-			markIndexDirty('笔记变化');
+			markIndexDirty('contentChanged');
 		});
 
 		await joplin.workspace.onSyncComplete(async () => {
-			markIndexDirty('同步完成');
+			markIndexDirty('syncCompleted');
+		});
+
+		await joplin.settings.onChange(async () => {
+			const previousLocale = ui.locale;
+			await reloadUi();
+			if (previousLocale !== ui.locale) schedulePanelRender();
 		});
 
 		try {
-			await rebuildIndex('初始化');
+			await rebuildIndex('initial');
 		} catch (_error) {
-			// 错误已通过 runtime 状态显示。
+			// Runtime state already shows the error.
 		}
 		await recordSelectedNoteUsage();
 		await joplin.views.panels.show(panelHandle, true);

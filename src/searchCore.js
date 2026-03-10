@@ -1,5 +1,7 @@
 'use strict';
 
+const { createUi } = require('./i18n');
+
 const DEFAULT_MAX_RESULTS = 200;
 const DEFAULT_PROGRESS_EVERY = 25;
 
@@ -248,15 +250,20 @@ function compareResults(a, b, sortBy, sortDir) {
 	return b.score - a.score;
 }
 
-function groupLabel(result, groupBy) {
-	if (groupBy === 'folder') return { key: result.folderPath || '未知笔记本', label: result.folderPath || '未知笔记本' };
-	if (groupBy === 'noteType') return { key: result.noteType, label: result.noteType === 'todo' ? '待办笔记' : '普通笔记' };
+function groupLabel(result, groupBy, ui) {
+	if (groupBy === 'folder') {
+		const label = result.folderPath || ui.t('group.unknownFolder');
+		return { key: label, label };
+	}
+	if (groupBy === 'noteType') {
+		return { key: result.noteType, label: result.noteType === 'todo' ? ui.t('group.noteType.todo') : ui.t('group.noteType.note') };
+	}
 	if (groupBy === 'updatedMonth') {
 		const date = result.updatedTime ? new Date(result.updatedTime) : null;
-		const key = date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}` : '未修改';
+		const key = date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}` : ui.t('group.unmodified');
 		return { key, label: key };
 	}
-	return { key: 'all', label: '搜索结果' };
+	return { key: 'all', label: ui.t('group.searchResults') };
 }
 
 function makeTaskProgress(input) {
@@ -285,12 +292,13 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 	const progressEvery = Number(options.progressEvery || DEFAULT_PROGRESS_EVERY);
 	const shouldCancel = typeof options.shouldCancel === 'function' ? options.shouldCancel : () => false;
 	const onProgress = typeof options.onProgress === 'function' ? options.onProgress : async () => {};
+	const ui = options.ui && typeof options.ui.t === 'function' ? options.ui : createUi('en');
 	const query = String(request?.query || '').trim();
 
 	if (!query) {
 		const response = {
 			request,
-			statusText: '请输入搜索词。支持智能 / 精确文本 / 正则。',
+			statusText: ui.t('search.emptyQuery'),
 			resultCount: 0,
 			groups: [],
 		};
@@ -312,7 +320,7 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 	if (request.mode === 'regex' && !safeRegex(query, request.caseSensitive)) {
 		const response = {
 			request,
-			statusText: '正则表达式无效，请检查写法。',
+			statusText: ui.t('search.invalidRegex'),
 			resultCount: 0,
 			groups: [],
 		};
@@ -336,8 +344,8 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 		kind: 'search',
 		phase: 'scan',
 		state: 'running',
-		statusText: '正在搜索...',
-		detail: total ? `已扫描 0 / ${total}` : '没有可搜索的笔记',
+		statusText: ui.t('search.searching'),
+		detail: total ? ui.t('search.scanProgress', { processed: 0, total }) : ui.t('search.noSearchableNotes'),
 		processed: 0,
 		total,
 		currentLabel: '',
@@ -352,8 +360,8 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 					kind: 'search',
 					phase: 'scan',
 					state: 'running',
-					statusText: '正在搜索...',
-					detail: `已扫描 ${i + 1} / ${total}`,
+					statusText: ui.t('search.searching'),
+					detail: ui.t('search.scanProgress', { processed: i + 1, total }),
 					processed: i + 1,
 					total,
 					currentLabel: note.title || note.id || '',
@@ -391,8 +399,8 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 				kind: 'search',
 				phase: 'scan',
 				state: 'running',
-				statusText: '正在搜索...',
-				detail: `已扫描 ${i + 1} / ${total}`,
+				statusText: ui.t('search.searching'),
+				detail: ui.t('search.scanProgress', { processed: i + 1, total }),
 				processed: i + 1,
 				total,
 				currentLabel: note.title || note.id || '',
@@ -405,14 +413,14 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 	const limited = results.slice(0, maxResults);
 	const groupedMap = new Map();
 	for (const result of limited) {
-		const group = groupLabel(result, request.groupBy);
+		const group = groupLabel(result, request.groupBy, ui);
 		if (!groupedMap.has(group.key)) groupedMap.set(group.key, { key: group.key, label: group.label, items: [] });
 		groupedMap.get(group.key).items.push(result);
 	}
 
 	const response = {
 		request,
-		statusText: results.length > maxResults ? `命中 ${results.length} 条，已显示前 ${maxResults} 条。` : `命中 ${results.length} 条。`,
+		statusText: results.length > maxResults ? ui.t('search.hitCountLimited', { count: results.length, max: maxResults }) : ui.t('search.hitCount', { count: results.length }),
 		resultCount: results.length,
 		groups: Array.from(groupedMap.values()),
 	};
@@ -422,7 +430,7 @@ async function searchNotesWithProgress(cachedNotes, noteStats, request, options 
 		phase: 'done',
 		state: 'done',
 		statusText: response.statusText,
-		detail: total ? `已扫描 ${total} / ${total}` : '',
+		detail: total ? ui.t('search.scanProgress', { processed: total, total }) : '',
 		processed: total,
 		total,
 		currentLabel: '',

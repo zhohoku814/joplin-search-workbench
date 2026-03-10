@@ -7,6 +7,7 @@ const {
 	parseSmartTokens,
 	searchNotesWithProgress,
 } = require('../src/searchCore');
+const { createUi } = require('../src/i18n');
 
 function sampleNotes() {
 	const bodyA = '# Alpha Heading\nhello world\n```js\nconst token = 1;\n```\nsecond line';
@@ -79,6 +80,7 @@ test('searchNotesWithProgress returns hits and emits progress', async () => {
 	const progressEvents = [];
 	const result = await searchNotesWithProgress(notes, {}, baseRequest(), {
 		progressEvery: 1,
+		ui: createUi('zh-CN'),
 		onProgress: async progress => {
 			progressEvents.push(progress);
 		},

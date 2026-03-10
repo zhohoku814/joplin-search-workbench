@@ -2,10 +2,10 @@
   "manifest_version": 1,
   "id": "com.openclaw.searchWorkbench",
   "app_min_version": "2.8",
-  "version": "0.3.1",
-  "name": "Search Workbench",
-  "description": "VS Code 风格的 Joplin 搜索工作台：全文片段、高亮、分组、排序、正则、时间过滤。",
-  "author": "OpenClaw",
+  "version": "0.3.2",
+  "name": "Search Workbench / 搜索工作台",
+  "description": "A VS Code-style search workbench for Joplin with snippets, highlighting, grouping, sorting, regex, reset controls, and collapsible advanced filters / 适用于 Joplin 的 VS Code 风格搜索工作台，支持片段预览、高亮、分组、排序、正则、重置操作与可折叠高级筛选。",
+  "author": "zhohoku814",
   "homepage_url": "https://github.com/zhohoku814/joplin-search-workbench",
   "repository_url": "https://github.com/zhohoku814/joplin-search-workbench",
   "keywords": [
@@ -22,6 +22,6 @@
   "platforms": [
     "desktop"
   ],
-  "_publish_hash": "sha256:58e96159a28c1ad6ab6408fbb8b6f44bb5e9b534671334097244b69fad2349bd",
+  "_publish_hash": "sha256:ca65985376f8bc79cf89a17d46eb98a6dba5cfe98c69e2f137538b82a4ab130c",
   "_publish_commit": ""
 }
