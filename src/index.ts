@@ -123,7 +123,7 @@ let saveStatsTimer: NodeJS.Timeout | null = null;
 let lastSelectedNoteId = '';
 let searchRunId = 0;
 let uiLanguageSetting: UiLanguage = 'auto';
-let ui = createUi('auto', Intl.DateTimeFormat().resolvedOptions().locale);
+let ui = createUi('auto', 'en');
 let panelModel: PanelModel = createPanelModel();
 
 function createDefaultRequest(): SearchRequest {
@@ -159,9 +159,20 @@ function localeString(ts: number) {
 	return new Date(ts).toLocaleString(ui.locale);
 }
 
+async function detectAppLocale(): Promise<string> {
+	try {
+		const locale = await joplin.settings.globalValue('locale');
+		if (locale) return String(locale);
+	} catch (_error) {
+		// Ignore and fallback.
+	}
+	return Intl.DateTimeFormat().resolvedOptions().locale || 'en';
+}
+
 async function reloadUi() {
 	uiLanguageSetting = (await joplin.settings.value(SETTINGS_UI_LANGUAGE) || 'auto') as UiLanguage;
-	ui = createUi(uiLanguageSetting, Intl.DateTimeFormat().resolvedOptions().locale);
+	const detectedLocale = await detectAppLocale();
+	ui = createUi(uiLanguageSetting, detectedLocale);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -921,7 +932,7 @@ function toggleAdvancedFilters() {
 
 joplin.plugins.register({
 	onStart: async function() {
-		ui = createUi('auto', Intl.DateTimeFormat().resolvedOptions().locale);
+		ui = createUi('auto', await detectAppLocale());
 
 		await joplin.settings.registerSection(SETTINGS_SECTION, {
 			label: t('settings.sectionLabel'),
